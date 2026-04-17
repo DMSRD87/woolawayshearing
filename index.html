@@ -754,12 +754,12 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
       if(step==='new1'){
         const np=newPin+n;
         setNewPin(np);
-        if(np.length===6){setStep('new2');setEntry('');}
+        if(np.length===4){setStep('new2');setEntry('');}
         else setEntry(np);
       } else {
         const conf=entry+n;
         setEntry(conf);
-        if(conf.length===6){
+        if(conf.length===4){
           const type=label==='Admin PIN'?'admin':'lead';
           if(conf===newPin){setPin(type,newPin);setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('PIN changed!');}
           else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
@@ -769,7 +769,7 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
     }
     const next=entry+n;
     setEntry(next);
-    if(next.length===6)tryPin(next);
+    if(next.length===4)tryPin(next);
   };
   const del=()=>{if(changing){if(step==='new2'&&entry.length===0){setStep('new1');setNewPin('');}else setEntry(e=>e.slice(0,-1));}else setEntry(e=>e.slice(0,-1));};
   const startChange=()=>{setChanging(true);setStep('new1');setEntry('');setNewPin('');setErr('');};
@@ -783,7 +783,7 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
     e('div',{className:'pin-subtitle'},displaySub||'Enter your PIN to continue'),
     e('div',{className:'pin-label'},displayLabel||'Enter PIN'),
     e('div',{className:'pin-dots'},
-      [0,1,2,3,4,5].map(i=>e('div',{key:i,className:`pin-dot${displayEntry.length>i?' filled':''}${err&&!err.includes('changed')?err?' error':'':''}`}))
+      [0,1,2,3].map(i=>e('div',{key:i,className:`pin-dot${displayEntry.length>i?' filled':''}${err&&!err.includes('changed')?err?' error':'':''}`}))
     ),
     e('div',{className:'pin-error'},err),
     e('div',{className:'pin-grid'},
