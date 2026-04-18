@@ -1513,27 +1513,28 @@ function AddCrewForm({onAdd,onCancel}){
 }
 
 function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
+  /* Only UI-driving state — NO controlled text inputs */
   const [type,setType]=useState('Shearing');
   const [farmId,setFarmId]=useState('');
-  const [startDate,setStartDate]=useState(localToday());
-  const [days,setDays]=useState('');
-  const [sheep,setSheep]=useState('');
   const [evos,setEvos]=useState('BYO');
   const [transport,setTransport]=useState(true);
-  const [accomm,setAccomm]=useState('');
-  const [notes,setNotes]=useState('');
-  const [jobPin,setJobPin]=useState('');
   const [selCrew,setSelCrew]=useState([]);
   const [showAddFarm,setShowAddFarm]=useState(false);
   const [showAddCrew,setShowAddCrew]=useState(false);
-  const [farmSearch,setFarmSearch]=useState('');
   const [submitErr,setSubmitErr]=useState('');
+  const [visibleFarms,setVisibleFarms]=useState(farmList);
+
+  /* Refs for all text/number inputs — browser manages value, zero re-renders on type */
+  const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
+  const rAccomm=useRef(),rNotes=useRef(),rJobPin=useRef();
 
   const tog=id=>setSelCrew(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
-  const filteredFarms=farmList.filter(f=>
-    f.name.toLowerCase().includes(farmSearch.toLowerCase())||
-    f.address.toLowerCase().includes(farmSearch.toLowerCase())
-  );
+
+  const handleFarmSearch=ev=>{
+    const q=ev.target.value.toLowerCase();
+    setVisibleFarms(q?farmList.filter(f=>f.name.toLowerCase().includes(q)||f.address.toLowerCase().includes(q)):farmList);
+  };
+
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
   const crewByRole=ROLE_ORDER.reduce((acc,r)=>{
     const members=crewList.filter(c=>c.role===r);
@@ -1542,6 +1543,9 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   },[]);
 
   const doCreate=()=>{
+    const days=rDays.current?.value?.trim();
+    const sheep=rSheep.current?.value?.trim();
+    const startDate=rStartDate.current?.value||localToday();
     if(!farmId||!days||!sheep||selCrew.length===0){
       setSubmitErr('Please select a farm, fill in days & sheep, and select at least one crew member.');
       return;
@@ -1549,15 +1553,20 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
     onCreate({
       id:'j'+Date.now(),
       jobNumber:String(Math.floor(2104+Math.random()*50)).padStart(6,'0'),
-      farmId,type,notes_job:notes,startDate,
-      daysAllocated:parseInt(days),totalSheep:parseInt(sheep),
-      evos,crutchingTrailer:false,transport,accommodation:accomm,
-      status:'Active',crew:selCrew,jobPin:jobPin.trim()||null,
+      farmId,type,
+      notes_job:rNotes.current?.value||'',
+      startDate,
+      daysAllocated:parseInt(days),
+      totalSheep:parseInt(sheep),
+      evos,crutchingTrailer:false,transport,
+      accommodation:rAccomm.current?.value||'',
+      status:'Active',crew:selCrew,
+      jobPin:rJobPin.current?.value?.trim()||null,
       rates:mkRates(),runs:{},shedTallies:{},baleTallies:{},baleBF:{},dayNotes:{}
     });
   };
 
-  const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);};
+  const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);setVisibleFarms([...farmList,f]);};
   const handleAddCrew=c=>{addCrew(c);setSelCrew(p=>[...p,c.id]);setShowAddCrew(false);};
 
   return e('div',{className:'overlay'},e('div',{className:'sheet'},
@@ -1571,10 +1580,10 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       ),
       e(FF,{label:'Select Farm'},
         e('div',null,
-          e('input',{type:'text',className:'farm-search',placeholder:'🔍 Search farms...',value:farmSearch,onChange:ev=>setFarmSearch(ev.target.value)}),
+          e('input',{type:'text',className:'farm-search',placeholder:'🔍 Search farms...',onInput:handleFarmSearch}),
           e('div',{className:'farm-list',style:{borderRadius:'0 0 8px 8px'}},
-            filteredFarms.length>0
-              ?filteredFarms.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
+            visibleFarms.length>0
+              ?visibleFarms.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
                   e('div',{className:'fo-name'},f.name),e('div',{className:'fo-addr'},f.address)))
               :e('div',{style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match — add one below')
           ),
@@ -1582,16 +1591,16 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
           showAddFarm&&e(AddFarmForm,{key:'add-farm',onAdd:handleAddFarm,onCancel:()=>setShowAddFarm(false)})
         )
       ),
-      e(FF,{label:'Start Date'},e('input',{type:'date',className:'fi',value:startDate,onChange:ev=>setStartDate(ev.target.value)})),
-      e(FF,{label:'Days Allocated'},e('input',{type:'number',className:'fi',placeholder:'e.g. 5',value:days,onChange:ev=>setDays(ev.target.value),min:1})),
-      e(FF,{label:'Total Sheep'},e('input',{type:'number',className:'fi',placeholder:'e.g. 3000',value:sheep,onChange:ev=>setSheep(ev.target.value),min:1})),
+      e(FF,{label:'Start Date'},e('input',{type:'date',className:'fi',defaultValue:localToday(),ref:rStartDate})),
+      e(FF,{label:'Days Allocated'},e('input',{type:'number',className:'fi',placeholder:'e.g. 5',min:1,ref:rDays,inputMode:'numeric'})),
+      e(FF,{label:'Total Sheep'},e('input',{type:'number',className:'fi',placeholder:'e.g. 3000',min:1,ref:rSheep,inputMode:'numeric'})),
       e(FF,{label:'EVOs'},e('div',{className:'tog-row'},...['BYO','Supplied at shed'].map(o=>e('button',{key:o,className:`tog-opt${evos===o?' on':''}`,onClick:()=>setEvos(o)},o)))),
       e(FF,{label:'Transport'},e('div',{className:'tog-row'},...[['Yes',true],['No',false]].map(([l,v])=>e('button',{key:l,className:`tog-opt${transport===v?' on':''}`,onClick:()=>setTransport(v)},l)))),
-      e(FF,{label:'Accommodation'},e('input',{type:'text',className:'fi',placeholder:'e.g. Shearers quarters on property',value:accomm,onChange:ev=>setAccomm(ev.target.value)})),
-      e(FF,{label:'Notes'},e('textarea',{className:'fi',rows:3,placeholder:'e.g. Merino full CRT and wig.',value:notes,onChange:ev=>setNotes(ev.target.value)})),
+      e(FF,{label:'Accommodation'},e('input',{type:'text',className:'fi',placeholder:'e.g. Shearers quarters on property',ref:rAccomm})),
+      e(FF,{label:'Notes'},e('textarea',{className:'fi',rows:3,placeholder:'e.g. Merino full CRT and wig.',ref:rNotes})),
       e(FF,{label:'Job PIN (optional)'},
         e('div',null,
-          e('input',{type:'number',className:'fi',placeholder:'Leave blank for no PIN — e.g. 4821',value:jobPin,onChange:ev=>setJobPin(ev.target.value),maxLength:6}),
+          e('input',{type:'number',className:'fi',placeholder:'Leave blank for no PIN — e.g. 4821',ref:rJobPin,maxLength:6,inputMode:'numeric'}),
           e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'🔒 If set, crew must enter this PIN to open the job.')
         )
       ),
