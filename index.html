@@ -726,14 +726,44 @@ function generateSummary(job,period){
 }
 /* ── TOP BAR ── */
 /* ── PIN CONFIG ── */
-const LS_PIN='mg_pin_'+CONTRACTOR_SLUG;
-const DEFAULT_APP_PIN='123456'; /* not used — kept for reference */
-const DEFAULT_LEAD_PIN='123456'; /* shed lead default PIN */
-const DEFAULT_ADMIN_PIN='987654'; /* admin default PIN */
-
+const DEFAULT_LEAD_PIN='123456';
+const DEFAULT_ADMIN_PIN='987654';
 const MASTER_PIN='SRD2026'; /* SRD override — never share */
-function getPin(type){return lsGet(LS_PIN+'_'+type)||(type==='admin'?DEFAULT_ADMIN_PIN:DEFAULT_LEAD_PIN);}
-function setPin(type,val){lsSet(LS_PIN+'_'+type,val);}
+
+/* SHA-256 hash — PINs never stored in plain text */
+async function hashPin(pin){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(pin+CONTRACTOR_SLUG));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+/* In-memory PIN cache loaded from Supabase */
+let _pinCache={lead:null,admin:null};
+let _pinLoaded=false;
+
+async function loadPins(){
+  if(_pinLoaded)return;
+  try{
+    const {data}=await sb.from('contractor_settings').select('lead_pin_hash,admin_pin_hash').eq('contractor_slug',CONTRACTOR_SLUG).single();
+    if(data){_pinCache.lead=data.lead_pin_hash;_pinCache.admin=data.admin_pin_hash;}
+  }catch(e){}
+  _pinLoaded=true;
+}
+
+async function checkPin(type,entered){
+  if(entered===MASTER_PIN)return true;
+  const hash=await hashPin(entered);
+  const stored=_pinCache[type];
+  if(!stored){const defHash=await hashPin(type==='admin'?DEFAULT_ADMIN_PIN:DEFAULT_LEAD_PIN);return hash===defHash;}
+  return hash===stored;
+}
+
+async function savePin(type,newVal){
+  const hash=await hashPin(newVal);
+  _pinCache[type]=hash;
+  const update={contractor_slug:CONTRACTOR_SLUG,updated_at:new Date().toISOString()};
+  update[type==='admin'?'admin_pin_hash':'lead_pin_hash']=hash;
+  await sb.from('contractor_settings').upsert(update,{onConflict:'contractor_slug'});
+}
 
 /* ── PIN PAD (reusable) ── */
 function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_overridePin}){
@@ -743,10 +773,11 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
   const [newPin,setNewPin]=useState('');
   const [step,setStep]=useState('enter'); /* enter | verify_current | new1 | new2 */
 
-  const tryPin=p=>{
-    const type=label==='Admin PIN'?'admin':'lead';
-    const correct=_overridePin||getPin(type);
-    if(p===correct||p===MASTER_PIN){setErr('');onSuccess();}
+  const type=label==='Admin PIN'?'admin':'lead';
+
+  const tryPin=async p=>{
+    const ok=await checkPin(type,p);
+    if(ok){setErr('');onSuccess();}
     else{setErr('Incorrect PIN');setEntry('');setTimeout(()=>setErr(''),1500);}
   };
 
@@ -756,10 +787,10 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
         const cur=entry+n;
         setEntry(cur);
         if(cur.length===6){
-          const type=label==='Admin PIN'?'admin':'lead';
-          const correct=_overridePin||getPin(type);
-          if(cur===correct){setStep('new1');setEntry('');setErr('');}
-          else{setErr('Incorrect current PIN');setEntry('');setTimeout(()=>setErr(''),1500);}
+          checkPin(type,cur).then(ok=>{
+            if(ok){setStep('new1');setEntry('');setErr('');}
+            else{setErr('Incorrect current PIN');setEntry('');setTimeout(()=>setErr(''),1500);}
+          });
         }
       } else if(step==='new1'){
         const np=newPin+n;
@@ -770,9 +801,11 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
         const conf=entry+n;
         setEntry(conf);
         if(conf.length===6){
-          const type=label==='Admin PIN'?'admin':'lead';
-          if(conf===newPin){setPin(type,newPin);setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('✓ PIN changed successfully!');}
-          else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
+          if(conf===newPin){
+            savePin(type,newPin).then(()=>{
+              setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('✓ PIN changed — all devices updated!');
+            });
+          } else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
         }
       }
       return;
@@ -798,7 +831,7 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
   ):label;
   const displaySub=changing?(
     step==='verify_current'?'Verify your current PIN before changing':
-    step==='new1'?'Choose a new 4-digit PIN':'Re-enter to confirm'
+    step==='new1'?'Choose a new 6-digit PIN':'Re-enter to confirm'
   ):subtitle;
 
   return e('div',{className:'pin-screen'},
@@ -1411,6 +1444,8 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
   ));
 }
 /* ── NEW JOB ── */
+const FF=({label,children})=>e('div',{className:'ff'},e('div',{className:'fl'},label),children);
+const IField=({lbl,children})=>e('div',null,e('div',{className:'if-lbl'},lbl),children);
 function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   const [type,setType]=useState('Shearing'),[farmId,setFarmId]=useState(''),[startDate,setStartDate]=useState(localToday()),[days,setDays]=useState(''),[sheep,setSheep]=useState(''),[evos,setEvos]=useState('BYO'),[transport,setTransport]=useState(true),[accomm,setAccomm]=useState(''),[notes,setNotes]=useState(''),[selCrew,setSelCrew]=useState([]);
   const [jobPin,setJobPin]=useState('');
@@ -1429,8 +1464,6 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   /* Group crew by role */
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
   const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=crewList.filter(c=>c.role===r);if(members.length)acc.push({role:r,members});return acc;},[]);
-  const FF=({label,children})=>e('div',{className:'ff'},e('div',{className:'fl'},label),children);
-  const IField=({lbl,children})=>e('div',null,e('div',{className:'if-lbl'},lbl),children);
   return e('div',{className:'overlay'},e('div',{className:'sheet'},
     e('div',{className:'sheet-handle'}),e('div',{className:'sheet-title'},'New Job'),
     e('div',{className:'sheet-scroll'},
@@ -1555,6 +1588,7 @@ function App(){
 
   /* Load on mount */
   useEffect(()=>{
+    loadPins(); /* load PIN hashes from Supabase on mount */
     dbLoad().then(({jobs:j,farms:f,crew:c,fromCache})=>{
       setJobs(j);setFarmList(f);setCrewList(c);
       setLoadedFromCache(fromCache);
