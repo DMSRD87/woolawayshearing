@@ -329,7 +329,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--b);min-height
 .send-btn{width:100%;padding:14px;background:linear-gradient(135deg,var(--green),#15803d);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:var(--b);display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 16px rgba(22,163,74,.3);transition:.12s}
 .send-btn:active{opacity:.85}
 /* MODALS */
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);z-index:200;display:flex;flex-direction:column;justify-content:flex-end;animation:fadeIn .18s ease}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);z-index:200;display:flex;flex-direction:column;justify-content:flex-end;animation:fadeIn .18s ease;overscroll-behavior:contain}
 .overlay2{z-index:300}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 .sheet{background:var(--card);border-top:1px solid var(--border);border-radius:20px 20px 0 0;max-height:90vh;display:flex;flex-direction:column;animation:slideUp .22s ease}
@@ -365,7 +365,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--b);min-height
 .ti-name{font-weight:600;font-size:14px;color:#111}.ti-role{font-size:12px;color:#555}.ti-car{font-size:11px;color:#1a73e8;font-weight:700;margin-top:2px}
 .ff{padding:0 16px;margin-bottom:14px}
 .fl{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.fi{width:100%;padding:11px 12px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--b);font-size:14px;outline:none;transition:.15s}
+.fi{width:100%;padding:11px 12px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--b);font-size:16px;outline:none;transition:.15s}
 .fi:focus{border-color:var(--amber)}.fi::placeholder{color:var(--dim)}
 textarea.fi{resize:none;line-height:1.5}
 .tog-row{display:flex;background:var(--card2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -1168,7 +1168,7 @@ function SummaryTab({job}){
   );
 }
 /* ── ADMIN TAB ── */
-function AdminTab({job,setJob}){
+function AdminTab({job,setJob,onEdit}){
   const rates=job.rates||{};
   const setRate=(k,v)=>setJob(prev=>({...prev,rates:{...prev.rates,[k]:parseFloat(v)||0}}));
   const setOv=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,crewOverrides:{...(prev.rates.crewOverrides||{}),[cid]:parseFloat(v)||0}}}));
@@ -1179,6 +1179,10 @@ function AdminTab({job,setJob}){
   const shedStaff=job.crew.filter(id=>gc(id)?.role!=='Shearer');
   const RCell=({lbl,k,hi,prefix})=>e('div',{className:`rate-cell${hi?' amber-bg':''}`},e('div',{className:`rate-lbl${hi?' hi':''}`},lbl),e('div',{className:'rate-inp-row'},prefix&&e('span',{className:'rate-prefix'},prefix),e('input',{type:'number',className:`rate-inp${hi?' hi':''}`,value:rates[k]||'',step:'0.05',onChange:ev=>setRate(k,ev.target.value)})));
   return e('div',{className:'admin-wrap'},
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Job Details')),
+      e('button',{className:'btn-p',onClick:onEdit,style:{width:'100%',marginBottom:0}},'✏️ Edit Job Details')
+    ),
     e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shearer Base Rates')),e('div',{className:'rate-grid'},e(RCell,{lbl:'Shearing $/head',k:'shearingPerHead',prefix:'$'}),e(RCell,{lbl:'Crutching $/head',k:'crutchingPerHead',prefix:'$'}))),
     e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shed Staff Rates'),e('div',{className:'admin-sec-sub'},'Per run. Presser switches to per-bale at threshold.')),e('div',{className:'rate-grid'},e(RCell,{lbl:'Wool Handler',k:'woolHandlerPerRun',prefix:'$'}),e(RCell,{lbl:'Classer',k:'classerPerRun',prefix:'$'}),e(RCell,{lbl:'Penner',k:'pennerPerRun',prefix:'$'}),e(RCell,{lbl:'Presser (per run)',k:'presserPerRun',prefix:'$'}),e(RCell,{lbl:'Presser $/bale',k:'presserPerBale',prefix:'$',hi:true}),e(RCell,{lbl:'Bale threshold/day',k:'baleThreshold',hi:true}))),
     shedStaff.length>0&&e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Per Person Rate Overrides'),e('div',{className:'admin-sec-sub'},'Override default $/run for individuals')),shedStaff.map(id=>{const c=gc(id);if(!c)return null;const cur=(rates.crewOverrides||{})[id]||'';const defR=c.role==='Wool Classer'?rates.classerPerRun:c.role==='Penner'?rates.pennerPerRun:c.role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;return e('div',{key:id,className:'loading-row'},e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+' — default $'+defR+'/run'))),e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:defR,step:'1',onChange:ev=>setOv(id,ev.target.value)}),e('span',{className:'lr-unit'},'/run')));})),
@@ -1278,7 +1282,7 @@ function OverviewTab({job,role,onSend,canSend}){
   );
 }
 /* ── JOB DETAIL ── */
-function JobDetailScreen({job,setJob,role,setRole,onBack,onSend}){
+function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit}){
   const [tab,setTab]=useState('tallies');
   const farm=gf(job.farmId);
   const dates=jobDates(job),todayStr=localToday();
@@ -1307,7 +1311,7 @@ function JobDetailScreen({job,setJob,role,setRole,onBack,onSend}){
       tab==='progress'&&e(ProgressTab,{job}),
       tab==='overview'&&e(OverviewTab,{job,role,onSend,canSend}),
       tab==='summary'&&role==='admin'&&e(SummaryTab,{job}),
-      tab==='admin'&&role==='admin'&&e(AdminTab,{job,setJob}),
+      tab==='admin'&&role==='admin'&&e(AdminTab,{job,setJob,onEdit}),
     )
   );
 }
@@ -1570,10 +1574,12 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);};
   const handleAddCrew=c=>{addCrew(c);setSelCrew(p=>[...p,c.id]);setShowAddCrew(false);};
 
-  return e('div',{className:'overlay'},e('div',{className:'sheet'},
-    e('div',{className:'sheet-handle'}),
-    e('div',{className:'sheet-title'},'New Job'),
-    e('div',{className:'sheet-scroll'},
+  return e('div',{style:{minHeight:'100%',display:'flex',flexDirection:'column',background:'var(--bg)'}},
+    e('div',{style:{background:'var(--hdr)',padding:'16px',display:'flex',alignItems:'center',gap:12,position:'sticky',top:0,zIndex:10}},
+      e('button',{onClick:onClose,style:{background:'none',border:'none',color:'rgba(255,255,255,.7)',fontSize:16,cursor:'pointer',padding:'4px 8px'}},'← Back'),
+      e('div',{style:{fontFamily:'var(--h)',fontSize:22,fontWeight:800,color:'#fff'}}, 'New Job')
+    ),
+    e('div',{style:{flex:1,padding:'0 0 120px 0'}},
       e(FF,{label:'Job Type'},
         e('div',{className:'tog-row'},...['Shearing','Crutching'].map(t=>
           e('button',{key:t,className:`tog-opt${type===t?' on':''}`,onClick:()=>setType(t)},t)
@@ -1619,13 +1625,108 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       ),
       submitErr&&e('div',{style:{padding:'0 16px 12px',fontSize:'13px',color:'var(--red)',fontWeight:600}},submitErr)
     ),
-    e('div',{className:'sheet-footer'},
-      e('button',{className:'btn-g',onClick:onClose},'Cancel'),
-      e('button',{className:'btn-p',onClick:doCreate},'Create Job')
+    e('div',{style:{position:'fixed',bottom:0,left:0,right:0,background:'var(--card)',borderTop:'1px solid var(--border)',padding:'12px 16px',display:'flex',gap:10,zIndex:10}},
+      e('button',{className:'btn-g',onClick:onClose,style:{flex:1}},'Cancel'),
+      e('button',{className:'btn-p',onClick:doCreate,style:{flex:2}},'Create Job')
     )
-  ));
+  );
 }
-,()=>true);
+/* ── EDIT JOB SCREEN ── */
+function EditJobScreen({job,onSave,onClose,farmList,addFarm}){
+  const [farmId,setFarmId]=useState(job.farmId||'');
+  const [type,setType]=useState(job.type||'Shearing');
+  const [evos,setEvos]=useState(job.evos||'BYO');
+  const [transport,setTransport]=useState(job.transport!==false);
+  const [farmQuery,setFarmQuery]=useState('');
+  const [showAddFarm,setShowAddFarm]=useState(false);
+  const [submitErr,setSubmitErr]=useState('');
+
+  const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
+  const rAccomm=useRef(),rNotes=useRef(),rJobPin=useRef();
+
+  const handleFarmSearch=ev=>setFarmQuery(ev.target.value.toLowerCase());
+  const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);};
+
+  const doSave=()=>{
+    const days=rDays.current?.value?.trim();
+    const sheep=rSheep.current?.value?.trim();
+    const startDate=rStartDate.current?.value||job.startDate;
+    if(!farmId||!days||!sheep){setSubmitErr('Farm, days and sheep are required.');return;}
+    onSave({
+      ...job,
+      farmId,type,
+      notes_job:rNotes.current?.value||job.notes_job||'',
+      startDate,
+      daysAllocated:parseInt(days),
+      totalSheep:parseInt(sheep),
+      evos,transport,
+      accommodation:rAccomm.current?.value!==undefined?rAccomm.current.value:job.accommodation||'',
+      jobPin:rJobPin.current?.value?.trim()||null,
+    });
+  };
+
+  const vf=farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList;
+
+  return e('div',{style:{minHeight:'100%',display:'flex',flexDirection:'column',background:'var(--bg)'}},
+    e('div',{style:{background:'var(--hdr)',padding:'16px',display:'flex',alignItems:'center',gap:12,position:'sticky',top:0,zIndex:10}},
+      e('button',{onClick:onClose,style:{background:'none',border:'none',color:'rgba(255,255,255,.7)',fontSize:16,cursor:'pointer',padding:'4px 8px'}},'← Back'),
+      e('div',{style:{fontFamily:'var(--h)',fontSize:22,fontWeight:800,color:'#fff'}},'Edit Job')
+    ),
+    e('div',{style:{flex:1,padding:'0 0 120px 0'}},
+      e(FF,{label:'Job Type'},
+        e('div',{className:'tog-row'},...['Shearing','Crutching'].map(t=>
+          e('button',{key:t,className:`tog-opt${type===t?' on':''}`,onClick:()=>setType(t)},t)
+        ))
+      ),
+      e(FF,{label:'Select Farm'},
+        e('div',null,
+          e('input',{type:'text',className:'farm-search',placeholder:'🔍 Search farms...',onInput:handleFarmSearch}),
+          e('div',{className:'farm-list',style:{borderRadius:'0 0 8px 8px'}},
+            vf.length>0
+              ?vf.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
+                  e('div',{className:'fo-name'},f.name),e('div',{className:'fo-addr'},f.address)))
+              :e('div',{style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match')
+          ),
+          !showAddFarm&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddFarm(true)},'+ Add New Farm'),
+          showAddFarm&&e(AddFarmForm,{key:'add-farm',onAdd:handleAddFarm,onCancel:()=>setShowAddFarm(false)})
+        )
+      ),
+      e(FF,{label:'Start Date'},
+        e('input',{type:'date',className:'fi',defaultValue:job.startDate,ref:rStartDate})),
+      e(FF,{label:'Days Allocated'},
+        e('input',{type:'number',className:'fi',defaultValue:job.daysAllocated,min:1,ref:rDays,inputMode:'numeric'})),
+      e(FF,{label:'Total Sheep'},
+        e('input',{type:'number',className:'fi',defaultValue:job.totalSheep,min:1,ref:rSheep,inputMode:'numeric'})),
+      e(FF,{label:'EVOs'},
+        e('div',{className:'tog-row'},...['BYO','Supplied at shed'].map(o=>
+          e('button',{key:o,className:`tog-opt${evos===o?' on':''}`,onClick:()=>setEvos(o)},o)
+        ))
+      ),
+      e(FF,{label:'Transport'},
+        e('div',{className:'tog-row'},...[['Yes',true],['No',false]].map(([l,v])=>
+          e('button',{key:l,className:`tog-opt${transport===v?' on':''}`,onClick:()=>setTransport(v)},l)
+        ))
+      ),
+      e(FF,{label:'Accommodation'},
+        e('input',{type:'text',className:'fi',defaultValue:job.accommodation||'',placeholder:'e.g. Shearers quarters on property',ref:rAccomm})),
+      e(FF,{label:'Notes'},
+        e('textarea',{className:'fi',rows:3,defaultValue:job.notes_job||'',placeholder:'e.g. Merino full CRT and wig.',ref:rNotes})),
+      e(FF,{label:'Job PIN (optional)'},
+        e('div',null,
+          e('input',{type:'number',className:'fi',defaultValue:job.jobPin||'',placeholder:'Leave blank for no PIN',ref:rJobPin,inputMode:'numeric'}),
+          e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'🔒 If set, crew must enter this PIN to open the job.')
+        )
+      ),
+      submitErr&&e('div',{style:{padding:'0 16px 12px',fontSize:'13px',color:'var(--red)',fontWeight:600}},submitErr)
+    ),
+    e('div',{style:{position:'fixed',bottom:0,left:0,right:0,background:'var(--card)',borderTop:'1px solid var(--border)',padding:'12px 16px',display:'flex',gap:10,zIndex:10}},
+      e('button',{className:'btn-g',onClick:onClose,style:{flex:1}},'Cancel'),
+      e('button',{className:'btn-p',onClick:doSave,style:{flex:2}},'Save Changes')
+    )
+  );
+}
+
+
 /* ── HOME ── */
 function HomeScreen({jobs,role,setRole,onJob,onNew,contractorName}){
   const active=jobs.filter(j=>j.status==='Active'),done=jobs.filter(j=>j.status==='Completed'||j.status==='Charged Out'),disp=jobs.filter(j=>j.status==='Dispatched');
@@ -1668,7 +1769,8 @@ function App(){
   const [farmList,setFarmList]=useState([]);
   const [crewList,setCrewList]=useState([]);
   const [showSMS,setShowSMS]=useState(false);
-  const [showNew,setShowNew]=useState(false);
+  const [showNew,setShowNew]=useState(false); /* now renders as full screen */
+  const [showEdit,setShowEdit]=useState(false);
   const [previewId,setPreviewId]=useState(null);
   const saveTimer=useRef(null);
   const isLoaded=useRef(false);
@@ -1772,10 +1874,11 @@ function App(){
   return e('div',{style:{paddingTop:!isOnline?20:0}},
     e(StatusBar),
     screen==='home'&&e(HomeScreen,{jobs,role,setRole,onJob:goJob,onNew:()=>setShowNew(true),contractorName:CONTRACTOR_NAME}),
-    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl}),
+    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl,onEdit:()=>setShowEdit(true)}),
     showSMS&&selJob&&e(SMSModal,{job:selJob,onClose:()=>{setShowSMS(false);setPreviewId(null);},onPreview:id=>setPreviewId(id),farmList,crewList}),
     previewId&&selJob&&e(JobCardView,{job:selJob,crewId:previewId,onClose:()=>setPreviewId(null),gfl,gcl}),
-    showNew&&e(NewJobModal,{onClose:()=>setShowNew(false),onCreate:doCreate,farmList,crewList,addFarm,addCrew}),
+    showNew&&e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,overflowY:'auto',WebkitOverflowScrolling:'touch'}},e(NewJobModal,{onClose:()=>setShowNew(false),onCreate:doCreate,farmList,crewList,addFarm,addCrew})),
+    showEdit&&selJob&&e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,overflowY:'auto',WebkitOverflowScrolling:'touch'}},e(EditJobScreen,{job:selJob,onClose:()=>setShowEdit(false),onSave:async updated=>{setJobs(p=>p.map(j=>j.id===updated.id?updated:j));setJobs(p=>p.map(j=>j.id===updated.id?updated:j));await dbSaveJob(updated).catch(()=>{});setShowEdit(false);},farmList,addFarm})),
     /* Job PIN gate */
     jobPinPending&&e('div',{className:'pin-modal'},
       e('div',{className:'pin-modal-box'},
