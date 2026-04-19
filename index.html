@@ -751,10 +751,14 @@ async function loadPins(){
 
 async function checkPin(type,entered){
   if(entered===MASTER_PIN)return true;
+  /* Plain text fallback for first login before any PIN has been set */
+  const def=type==='admin'?DEFAULT_ADMIN_PIN:DEFAULT_LEAD_PIN;
+  if(!_pinCache[type]){
+    /* No hash stored yet — accept plain text default OR master */
+    return entered===def;
+  }
   const hash=await hashPin(entered);
-  const stored=_pinCache[type];
-  if(!stored){const defHash=await hashPin(type==='admin'?DEFAULT_ADMIN_PIN:DEFAULT_LEAD_PIN);return hash===defHash;}
-  return hash===stored;
+  return hash===_pinCache[type];
 }
 
 async function savePin(type,newVal){
@@ -1522,7 +1526,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   const [showAddFarm,setShowAddFarm]=useState(false);
   const [showAddCrew,setShowAddCrew]=useState(false);
   const [submitErr,setSubmitErr]=useState('');
-  const [visibleFarms,setVisibleFarms]=useState(farmList);
+  const [farmQuery,setFarmQuery]=useState('');
 
   /* Refs for all text/number inputs — browser manages value, zero re-renders on type */
   const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
@@ -1530,10 +1534,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
 
   const tog=id=>setSelCrew(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
 
-  const handleFarmSearch=ev=>{
-    const q=ev.target.value.toLowerCase();
-    setVisibleFarms(q?farmList.filter(f=>f.name.toLowerCase().includes(q)||f.address.toLowerCase().includes(q)):farmList);
-  };
+  const handleFarmSearch=ev=>setFarmQuery(ev.target.value.toLowerCase());
 
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
   const crewByRole=ROLE_ORDER.reduce((acc,r)=>{
@@ -1566,7 +1567,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
     });
   };
 
-  const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);setVisibleFarms([...farmList,f]);};
+  const handleAddFarm=f=>{addFarm(f);setFarmId(f.id);setShowAddFarm(false);};
   const handleAddCrew=c=>{addCrew(c);setSelCrew(p=>[...p,c.id]);setShowAddCrew(false);};
 
   return e('div',{className:'overlay'},e('div',{className:'sheet'},
@@ -1582,11 +1583,9 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
         e('div',null,
           e('input',{type:'text',className:'farm-search',placeholder:'🔍 Search farms...',onInput:handleFarmSearch}),
           e('div',{className:'farm-list',style:{borderRadius:'0 0 8px 8px'}},
-            visibleFarms.length>0
-              ?visibleFarms.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
+            (()=>{const vf=farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList;return vf.length>0?vf.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
                   e('div',{className:'fo-name'},f.name),e('div',{className:'fo-addr'},f.address)))
-              :e('div',{style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match — add one below')
-          ),
+              :e('div',{style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match — add one below'));})(),
           !showAddFarm&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddFarm(true)},'+ Add New Farm'),
           showAddFarm&&e(AddFarmForm,{key:'add-farm',onAdd:handleAddFarm,onCancel:()=>setShowAddFarm(false)})
         )
@@ -1626,6 +1625,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
     )
   ));
 }
+,()=>true);
 /* ── HOME ── */
 function HomeScreen({jobs,role,setRole,onJob,onNew,contractorName}){
   const active=jobs.filter(j=>j.status==='Active'),done=jobs.filter(j=>j.status==='Completed'||j.status==='Charged Out'),disp=jobs.filter(j=>j.status==='Dispatched');
@@ -1737,7 +1737,13 @@ function App(){
     }
   };
   const goHome=()=>{setScreen('home');setSelJobId(null);setShowSMS(false);setPreviewId(null);setJobPinPending(null);};
-  const doCreate=job=>{setJobs(p=>[job,...p]);setShowNew(false);setSelJobId(job.id);setScreen('job');};
+  const doCreate=async job=>{
+    setJobs(p=>[job,...p]);
+    setShowNew(false);
+    setSelJobId(job.id);
+    setScreen('job');
+    await dbSaveJob(job).catch(()=>{});
+  };
 
   /* Loading screen */
   if(loading)return e('div',{style:{height:'100dvh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:16,background:'var(--hdr)'}},
