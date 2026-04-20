@@ -911,7 +911,7 @@ function JLC({job,onClick}){
   const farm=gf(job.farmId),p=calcProg(job);
   const cls=p.pct>=80?'fg':p.pct>=40?'fa':'fr';
   return e('div',{className:'jlc',onClick},
-    e('div',{className:'jlc-top'},e('div',null,e('div',{className:'jlc-name'},farm?farm.name:'Unknown',job.jobPin&&e('span',{style:{fontSize:'14px',marginLeft:6,opacity:.5}},'🔒')),e('div',{className:'jlc-num'},'#'+job.jobNumber)),e(Bdg,{status:job.status})),
+    e('div',{className:'jlc-top'},e('div',null,e('div',{className:'jlc-name'},job.jobName||(farm?farm.name:'Unknown'),job.jobPin&&e('span',{style:{fontSize:'14px',marginLeft:6,opacity:.5}},'🔒')),e('div',{className:'jlc-num'},'#'+job.jobNumber)),e(Bdg,{status:job.status})),
     e('div',{className:'jlc-meta'},e('span',{className:'pill'},job.type),e('span',{style:{fontSize:'12px',color:'var(--muted)'}},job.totalSheep.toLocaleString()+' sheep'),e('span',{style:{fontSize:'12px',color:'var(--muted)'}},job.crew.length+' crew')),
     job.status==='Active'&&p.daysWorked>0&&e('div',null,e('div',{className:'jlc-pr'},e('span',null,p.shorn.toLocaleString()+' / '+job.totalSheep.toLocaleString()+' — Day '+p.daysWorked+' of '+job.daysAllocated),e('span',{className:'pct-lbl'},Math.round(p.pct)+'%')),e('div',{className:'pbar'},e('div',{className:`pbar-f ${cls}`,style:{width:p.pct+'%'}}))),
     job.status==='Dispatched'&&e('div',{style:{fontSize:'12px',color:'var(--amber)',marginTop:'6px'}},'📱 Dispatched — starts '+fmtDateLong(job.startDate)),
@@ -1294,10 +1294,10 @@ function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit}){
   if(role==='admin'){tabs.push(['summary','Summary']);tabs.push(['admin','Admin']);}
   const canSend=(role==='admin'||role==='shed_lead')&&job.status!=='Completed'&&job.status!=='Charged Out';
   return e('div',null,
-    e(TopBar,{role,setRole,onBack,backLabel:farm?farm.name:'Jobs'}),
+    e(TopBar,{role,setRole,onBack,backLabel:job.jobName||(farm?farm.name:'Jobs')}),
     e('div',{className:'screen'},
       e('div',{className:'jd-hero'},
-        e('div',{className:'jd-farm'},farm?farm.name:'Unknown Farm'),
+        e('div',{className:'jd-farm'},job.jobName||(farm?farm.name:'Unknown Farm')),
         e('div',{className:'jd-sub'},
           role==='admin'
             ?e('button',{className:'status-btn',onClick:cycleStatus,title:'Tap to change status'},e(Bdg,{status:job.status}),e('span',{className:'status-hint'},'tap to change'))
@@ -1533,7 +1533,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   const [farmQuery,setFarmQuery]=useState('');
 
   /* Refs for all text/number inputs — browser manages value, zero re-renders on type */
-  const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
+  const rJobName=useRef(),rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
   const rAccomm=useRef(),rNotes=useRef(),rJobPin=useRef();
 
   const tog=id=>setSelCrew(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
@@ -1567,6 +1567,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       accommodation:rAccomm.current?.value||'',
       status:'Active',crew:selCrew,
       jobPin:rJobPin.current?.value?.trim()||null,
+      jobName:rJobName.current?.value?.trim()||'',
       rates:mkRates(),runs:{},shedTallies:{},baleTallies:{},baleBF:{},dayNotes:{}
     });
   };
@@ -1580,6 +1581,12 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       e('div',{style:{fontFamily:'var(--h)',fontSize:22,fontWeight:800,color:'#fff'}}, 'New Job')
     ),
     e('div',{style:{flex:1,padding:'0 0 120px 0'}},
+      e(FF,{label:'Job Name'},
+        e('div',null,
+          e('input',{type:'text',className:'fi',placeholder:'e.g. Smith Station, Gillap, Mueller...',ref:rJobName}),
+          e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'Overrides farm name as the job title. Leave blank to use farm name.')
+        )
+      ),
       e(FF,{label:'Job Type'},
         e('div',{className:'tog-row'},...['Shearing','Crutching'].map(t=>
           e('button',{key:t,className:`tog-opt${type===t?' on':''}`,onClick:()=>setType(t)},t)
@@ -1643,7 +1650,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const [selCrew,setSelCrew]=useState(job.crew||[]);
   const [submitErr,setSubmitErr]=useState('');
 
-  const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
+  const rJobName=useRef(),rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
   const rAccomm=useRef(),rNotes=useRef(),rJobPin=useRef();
 
   const handleFarmSearch=ev=>setFarmQuery(ev.target.value.toLowerCase());
@@ -1664,6 +1671,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
       evos,transport,
       accommodation:rAccomm.current?.value!==undefined?rAccomm.current.value:job.accommodation||'',
       jobPin:rJobPin.current?.value?.trim()||null,
+      jobName:rJobName.current?.value?.trim()||'',
       crew:selCrew,
     });
   };
@@ -1681,6 +1689,12 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
       e('div',{style:{fontFamily:'var(--h)',fontSize:22,fontWeight:800,color:'#fff'}},'Edit Job')
     ),
     e('div',{style:{flex:1,padding:'0 0 120px 0'}},
+      e(FF,{label:'Job Name'},
+        e('div',null,
+          e('input',{type:'text',className:'fi',defaultValue:job.jobName||'',placeholder:'e.g. Smith Station, Gillap, Mueller...',ref:rJobName}),
+          e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'Overrides farm name as the job title. Leave blank to use farm name.')
+        )
+      ),
       e(FF,{label:'Job Type'},
         e('div',{className:'tog-row'},...['Shearing','Crutching'].map(t=>
           e('button',{key:t,className:`tog-opt${type===t?' on':''}`,onClick:()=>setType(t)},t)
