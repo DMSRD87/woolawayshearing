@@ -510,8 +510,9 @@ async function dbSaveCrew(member){
     dequeue('crew',member.id);
   }catch(e){queueWrite('crew',member.id,member);throw e;}
 }
-const FARMS=[];
-const CREW=[];
+let FARMS=[];
+let CREW=[];
+function syncLookups(farms,crew){FARMS.length=0;FARMS.push(...(farms||[]));CREW.length=0;CREW.push(...(crew||[]));}
 const mkRun=(id,type,desc,counts,ro)=>({id,mobs:[{id:id+'_m1',type,desc,counts,...(ro!=null?{rateOverride:ro}:{})}]});
 const mkRates=(ov={})=>({shearingPerHead:4.80,crutchingPerHead:1.55,woolHandlerPerRun:80,classerPerRun:110,pennerPerRun:85,presserPerRun:85,presserPerBale:14.20,baleThreshold:13,crewOverrides:{},shearerLoadings:{},travelDays:{},travelRate:{},payDayOfWeek:4,payFrequency:'weekly',farmerShearingRate:6.50,farmerCrutchingRate:2.00,crewDetails:{},...ov});
 const INIT_JOBS=[];
@@ -1266,14 +1267,40 @@ function ProgressTab({job}){
   );
 }
 /* ── OVERVIEW TAB ── */
-function OverviewTab({job,role,onSend,canSend}){
+/* ── EDIT FARM MODAL ── */
+function EditFarmModal({farm,onSave,onClose}){
+  const rName=useRef(),rAddr=useRef(),rStands=useRef(),rNotes=useRef();
+  const doSave=()=>{
+    const name=rName.current?.value?.trim();
+    const addr=rAddr.current?.value?.trim();
+    if(!name||!addr)return;
+    onSave({...farm,name,address:addr,stands:parseInt(rStands.current?.value)||farm.stands||4,notes:rNotes.current?.value||''});
+  };
+  return e('div',{className:'overlay'},e('div',{className:'sheet'},
+    e('div',{className:'sheet-handle'}),
+    e('div',{className:'sheet-title'},'Edit Farm Details'),
+    e('div',{className:'sheet-scroll'},
+      e(FF,{label:'Farm Name'},e('input',{type:'text',className:'fi',defaultValue:farm.name,ref:rName})),
+      e(FF,{label:'Address'},e('input',{type:'text',className:'fi',defaultValue:farm.address,ref:rAddr})),
+      e(FF,{label:'Stands'},e('input',{type:'number',className:'fi',defaultValue:farm.stands||4,min:1,ref:rStands,inputMode:'numeric'})),
+      e(FF,{label:'Notes (optional)'},e('input',{type:'text',className:'fi',defaultValue:farm.notes||'',placeholder:'e.g. Gate code 1234',ref:rNotes}))
+    ),
+    e('div',{className:'sheet-footer'},
+      e('button',{className:'btn-g',onClick:onClose},'Cancel'),
+      e('button',{className:'btn-p',onClick:doSave},'Save Farm')
+    )
+  ));
+}
+
+
+function OverviewTab({job,role,onSend,canSend,onEditFarm}){
   const farm=gf(job.farmId);
   const IC=({l,v,full})=>e('div',{className:'ic'+(full?' full-ic':'')},e('div',{className:'ic-l'},l),e('div',{className:'ic-v'},v));
   return e('div',null,
     e('div',{style:{height:12}}),
     e('div',{className:'info-grid'},e(IC,{l:'Job Type',v:job.type}),e(IC,{l:'Total Sheep',v:job.totalSheep.toLocaleString()}),e(IC,{l:'Start Date',v:fmtDateLong(job.startDate)}),e(IC,{l:'Days Allocated',v:job.daysAllocated+' days'}),e(IC,{l:'EVOs',v:job.evos}),e(IC,{l:'Transport',v:job.transport?'✓ Available':'BYO'}),e(IC,{l:'Crutching Trailer',v:job.crutchingTrailer?'✓ Provided':'Not provided'}),e(IC,{l:'Accommodation',v:job.accommodation,full:true})),
     job.notes_job&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Notes'),e('div',{className:'ic-v',style:{fontSize:'13px',color:'var(--muted)',fontWeight:400}},job.notes_job))),
-    farm&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Farm Address'),e('div',{className:'ic-v'},farm.address),farm.notes&&e('div',{style:{fontSize:'12px',color:'var(--dim)',marginTop:4}},farm.notes),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(farm.address),target:'_blank',className:'map-link'},'📍 Open in Maps'))),
+    farm&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Farm Address'),e('div',{className:'ic-v'},farm.address),farm.notes&&e('div',{style:{fontSize:'12px',color:'var(--dim)',marginTop:4}},farm.notes),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(farm.address),target:'_blank',className:'map-link'},'📍 Open in Maps')),role==='admin'&&onEditFarm&&e('button',{className:'map-link',style:{marginTop:6,display:'block',color:'var(--amber)',cursor:'pointer',background:'none',border:'none',padding:0,fontSize:13},onClick:onEditFarm},'✏️ Edit farm details')),
     e('div',{className:'crew-hdr'},e('span',null,'Crew — '+job.crew.length)),
     job.crew.map(id=>{const c=gc(id);if(!c)return null;return e('div',{key:id,className:'crew-row'},e('div',{className:'cr-l'},e(Av,{name:c.name}),e('div',null,e('div',{className:'cr-name'},c.name,c.hasVehicle&&e('span',{className:'car-tag'},'🚗')),e('div',{className:'cr-role'},c.role))),role==='admin'&&e('div',{style:{fontFamily:'var(--m)',fontSize:'11px',color:'var(--dim)'}},c.phone));}),
     /* SEND JOB CARDS — overview tab only (Edit 6) */
@@ -1284,7 +1311,15 @@ function OverviewTab({job,role,onSend,canSend}){
 /* ── JOB DETAIL ── */
 function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit}){
   const [tab,setTab]=useState('tallies');
+  const [showEditFarm,setShowEditFarm]=useState(false);
   const farm=gf(job.farmId);
+  const handleSaveFarm=f=>{
+    const idx=FARMS.findIndex(x=>x.id===f.id);
+    if(idx>=0)FARMS.splice(idx,1,f); else FARMS.push(f);
+    sb.from('farms').upsert({id:f.id,contractor_slug:CONTRACTOR_SLUG,data:f}).catch(()=>{});
+    setJob(prev=>({...prev,_farmUpdated:Date.now()}));
+    setShowEditFarm(false);
+  };
   const dates=jobDates(job),todayStr=localToday();
   const defDate=dates.includes(todayStr)?todayStr:dates[dates.length-1];
   const [viewDate,setViewDate]=useState(defDate);
@@ -1309,9 +1344,10 @@ function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit}){
       e('div',{className:'tabs'},tabs.map(([k,l])=>e('button',{key:k,className:`tab-btn${tab===k?' on':''}`,onClick:()=>setTab(k)},l))),
       tab==='tallies'&&e(TallyTab,{job,setJob,role,viewDate,setViewDate}),
       tab==='progress'&&e(ProgressTab,{job}),
-      tab==='overview'&&e(OverviewTab,{job,role,onSend,canSend}),
+      tab==='overview'&&e(OverviewTab,{job,role,onSend,canSend,onEditFarm:role==='admin'?()=>setShowEditFarm(true):null}),
       tab==='summary'&&role==='admin'&&e(SummaryTab,{job}),
       tab==='admin'&&role==='admin'&&e(AdminTab,{job,setJob,onEdit}),
+      showEditFarm&&farm&&e(EditFarmModal,{farm,onSave:handleSaveFarm,onClose:()=>setShowEditFarm(false)})
     )
   );
 }
@@ -1815,12 +1851,16 @@ function App(){
   useEffect(()=>{
     loadPins(); /* load PIN hashes from Supabase on mount */
     dbLoad().then(({jobs:j,farms:f,crew:c,fromCache})=>{
+      syncLookups(f,c);
       setJobs(j);setFarmList(f);setCrewList(c);
       setLoadedFromCache(fromCache);
       setLoading(false);isLoaded.current=true;
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
     }).catch(()=>{setLoading(false);isLoaded.current=true;});
   },[]);
+
+  /* Sync global lookups whenever lists update */
+  useEffect(()=>{syncLookups(farmList,crewList);},[farmList,crewList]);
 
   /* Online/offline detection + auto-sync queue */
   useEffect(()=>{
@@ -1859,8 +1899,8 @@ function App(){
     },1500);
   },[jobs,isOnline]);
 
-  const addFarm=async f=>{setFarmList(p=>[...p,f]);await dbSaveFarm(f).catch(()=>{});};
-  const addCrew=async c=>{setCrewList(p=>[...p,c]);await dbSaveCrew(c).catch(()=>{});};
+  const addFarm=async f=>{setFarmList(p=>{const n=[...p,f];syncLookups(n,CREW);return n;});await dbSaveFarm(f).catch(()=>{});};
+  const addCrew=async c=>{setCrewList(p=>{const n=[...p,c];syncLookups(FARMS,n);return n;});await dbSaveCrew(c).catch(()=>{});};
   const gfl=id=>farmList.find(f=>f.id===id);
   const gcl=id=>crewList.find(c=>c.id===id);
   const selJob=jobs.find(j=>j.id===selJobId);
