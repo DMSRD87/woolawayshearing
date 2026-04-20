@@ -501,6 +501,11 @@ async function dbSaveFarm(farm){
     dequeue('farm',farm.id);
   }catch(e){queueWrite('farm',farm.id,farm);throw e;}
 }
+async function dbDeleteFarm(farmId){
+  const farms=lsGet(LS_FARMS)||[];
+  lsSet(LS_FARMS,farms.filter(f=>f.id!==farmId));
+  try{await sb.from('farms').delete().eq('id',farmId).eq('contractor_slug',CONTRACTOR_SLUG);}catch(e){}
+}
 async function dbSaveCrew(member){
   const crew=lsGet(LS_CREW)||[];
   const updated=crew.find(c=>c.id===member.id)?crew.map(c=>c.id===member.id?member:c):[member,...crew];
@@ -521,7 +526,7 @@ const gc=id=>CREW.find(c=>c.id===id);
 const AVC=[{bg:'#78350f',fg:'#fbbf24'},{bg:'#14532d',fg:'#4ade80'},{bg:'#1e3a5f',fg:'#60a5fa'},{bg:'#7f1d1d',fg:'#f87171'},{bg:'#3b0764',fg:'#c084fc'},{bg:'#064e3b',fg:'#34d399'},{bg:'#7c2d12',fg:'#fb923c'},{bg:'#581c87',fg:'#e879f9'},{bg:'#0c4a6e',fg:'#38bdf8'},{bg:'#1a2e05',fg:'#a3e635'},{bg:'#431407',fg:'#fdba74'},{bg:'#1e1b4b',fg:'#818cf8'}];
 const avc=n=>AVC[n.charCodeAt(0)%AVC.length];
 const init=n=>n.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
-const sn=n=>{const p=n.split(' ');return p[0]+' '+p[p.length-1][0]+'.'};
+const sn=n=>{if(!n)return'Unknown';const p=n.trim().split(' ').filter(Boolean);if(p.length===1)return p[0];return p[0]+' '+p[p.length-1][0]+'.';};
 const DAY_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 function Av({name,size=34}){const c=avc(name);return e('div',{className:'av',style:{width:size,height:size,background:c.bg,color:c.fg,fontSize:size*.38+'px'}},init(name));}
 function Bdg({status}){const m={Active:'b-active',Completed:'b-completed','Charged Out':'b-charged',Dispatched:'b-dispatched'};const d={Active:'● ',Dispatched:'◆ '};return e('span',{className:`badge ${m[status]||'b-active'}`},(d[status]||'')+status);}
@@ -1169,7 +1174,8 @@ function SummaryTab({job}){
   );
 }
 /* ── ADMIN TAB ── */
-function AdminTab({job,setJob,onEdit}){
+function AdminTab({job,setJob,onEdit,onDeleteFarm}){
+  const [confirmDelete,setConfirmDelete]=useState(false);
   const rates=job.rates||{};
   const setRate=(k,v)=>setJob(prev=>({...prev,rates:{...prev.rates,[k]:parseFloat(v)||0}}));
   const setOv=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,crewOverrides:{...(prev.rates.crewOverrides||{}),[cid]:parseFloat(v)||0}}}));
@@ -1249,6 +1255,21 @@ function AdminTab({job,setJob,onEdit}){
       e('div',{className:'rate-grid'},
         e('div',{className:'rate-cell'},e('div',{className:'rate-lbl'},'Shearing $/head'),e('div',{className:'rate-inp-row'},e('span',{className:'rate-prefix'},'$'),e('input',{type:'number',className:'rate-inp',value:rates.farmerShearingRate||'',placeholder:'6.50',step:'0.05',onChange:ev=>setRate('farmerShearingRate',ev.target.value)}))),
         e('div',{className:'rate-cell'},e('div',{className:'rate-lbl'},'Crutching $/head'),e('div',{className:'rate-inp-row'},e('span',{className:'rate-prefix'},'$'),e('input',{type:'number',className:'rate-inp',value:rates.farmerCrutchingRate||'',placeholder:'2.00',step:'0.05',onChange:ev=>setRate('farmerCrutchingRate',ev.target.value)})))
+      )
+    ),
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title',style:{color:'#ef4444'}},'Danger Zone')),
+      !confirmDelete&&e('button',{
+        onClick:()=>setConfirmDelete(true),
+        style:{width:'100%',padding:'12px',background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',borderRadius:8,color:'#ef4444',fontWeight:700,fontSize:14,cursor:'pointer'}
+      },'🗑️ Delete Farm from List'),
+      confirmDelete&&e('div',{style:{background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.2)',borderRadius:10,padding:16}},
+        e('div',{style:{fontWeight:700,fontSize:14,marginBottom:6,color:'#ef4444'}},'Delete this farm?'),
+        e('div',{style:{fontSize:13,color:'var(--muted)',marginBottom:14}},'Removes the farm from your farm list. Existing jobs using it are unaffected.'),
+        e('div',{style:{display:'flex',gap:10}},
+          e('button',{className:'btn-g',style:{flex:1},onClick:()=>setConfirmDelete(false)},'Cancel'),
+          e('button',{style:{flex:1,padding:'10px',background:'#ef4444',border:'none',borderRadius:8,color:'#fff',fontWeight:700,fontSize:14,cursor:'pointer'},onClick:onDeleteFarm},'Yes, Delete')
+        )
       )
     ),
     e('div',{style:{height:16}})
@@ -1346,7 +1367,7 @@ function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit}){
       tab==='progress'&&e(ProgressTab,{job}),
       tab==='overview'&&e(OverviewTab,{job,role,onSend,canSend,onEditFarm:role==='admin'?()=>setShowEditFarm(true):null}),
       tab==='summary'&&role==='admin'&&e(SummaryTab,{job}),
-      tab==='admin'&&role==='admin'&&e(AdminTab,{job,setJob,onEdit}),
+      tab==='admin'&&role==='admin'&&e(AdminTab,{job,setJob,onEdit,onDeleteFarm:()=>{const farm=gf(job.farmId);if(!farm)return;dbDeleteFarm(farm.id);setFarmList(p=>{const n=p.filter(f=>f.id!==farm.id);syncLookups(n,CREW);return n;});}}),
       showEditFarm&&farm&&e(EditFarmModal,{farm,onSave:handleSaveFarm,onClose:()=>setShowEditFarm(false)})
     )
   );
