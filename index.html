@@ -1632,13 +1632,15 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   );
 }
 /* ── EDIT JOB SCREEN ── */
-function EditJobScreen({job,onSave,onClose,farmList,addFarm}){
+function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const [farmId,setFarmId]=useState(job.farmId||'');
   const [type,setType]=useState(job.type||'Shearing');
   const [evos,setEvos]=useState(job.evos||'BYO');
   const [transport,setTransport]=useState(job.transport!==false);
   const [farmQuery,setFarmQuery]=useState('');
   const [showAddFarm,setShowAddFarm]=useState(false);
+  const [showAddCrew,setShowAddCrew]=useState(false);
+  const [selCrew,setSelCrew]=useState(job.crew||[]);
   const [submitErr,setSubmitErr]=useState('');
 
   const rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
@@ -1662,8 +1664,14 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm}){
       evos,transport,
       accommodation:rAccomm.current?.value!==undefined?rAccomm.current.value:job.accommodation||'',
       jobPin:rJobPin.current?.value?.trim()||null,
+      crew:selCrew,
     });
   };
+
+  const tog=id=>setSelCrew(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const handleAddCrew=c=>{addCrew(c);setSelCrew(p=>[...p,c.id]);setShowAddCrew(false);};
+  const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
+  const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=(crewList||[]).filter(c=>c.role===r);if(members.length)acc.push({role:r,members});return acc;},[]);
 
   const vf=farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList;
 
@@ -1715,6 +1723,20 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm}){
         e('div',null,
           e('input',{type:'number',className:'fi',defaultValue:job.jobPin||'',placeholder:'Leave blank for no PIN',ref:rJobPin,inputMode:'numeric'}),
           e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'🔒 If set, crew must enter this PIN to open the job.')
+        )
+      ),
+      e(FF,{label:`Crew (${selCrew.length} selected)`},
+        e('div',null,
+          crewByRole.map(({role:r,members})=>e('div',{key:r},
+            e('div',{className:'crew-group-lbl'},r+'s'),
+            e('div',{className:'chip-wrap'},
+              members.map(c=>e('div',{key:c.id,className:`chip${selCrew.includes(c.id)?' sel':''}`,onClick:()=>tog(c.id)},
+                c.name.split(' ')[0]+(c.hasVehicle?' 🚗':'')
+              ))
+            )
+          )),
+          !showAddCrew&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddCrew(true)},'+ Add New Crew Member'),
+          showAddCrew&&e(AddCrewForm,{key:'add-crew',onAdd:handleAddCrew,onCancel:()=>setShowAddCrew(false)})
         )
       ),
       submitErr&&e('div',{style:{padding:'0 16px 12px',fontSize:'13px',color:'var(--red)',fontWeight:600}},submitErr)
@@ -1878,7 +1900,7 @@ function App(){
     showSMS&&selJob&&e(SMSModal,{job:selJob,onClose:()=>{setShowSMS(false);setPreviewId(null);},onPreview:id=>setPreviewId(id),farmList,crewList}),
     previewId&&selJob&&e(JobCardView,{job:selJob,crewId:previewId,onClose:()=>setPreviewId(null),gfl,gcl}),
     showNew&&e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,overflowY:'auto',WebkitOverflowScrolling:'touch'}},e(NewJobModal,{onClose:()=>setShowNew(false),onCreate:doCreate,farmList,crewList,addFarm,addCrew})),
-    showEdit&&selJob&&e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,overflowY:'auto',WebkitOverflowScrolling:'touch'}},e(EditJobScreen,{job:selJob,onClose:()=>setShowEdit(false),onSave:async updated=>{setJobs(p=>p.map(j=>j.id===updated.id?updated:j));setJobs(p=>p.map(j=>j.id===updated.id?updated:j));await dbSaveJob(updated).catch(()=>{});setShowEdit(false);},farmList,addFarm})),
+    showEdit&&selJob&&e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,overflowY:'auto',WebkitOverflowScrolling:'touch'}},e(EditJobScreen,{job:selJob,onClose:()=>setShowEdit(false),onSave:async updated=>{setJobs(p=>p.map(j=>j.id===updated.id?updated:j));await dbSaveJob(updated).catch(()=>{});setShowEdit(false);},farmList,addFarm,crewList,addCrew})),
     /* Job PIN gate */
     jobPinPending&&e('div',{className:'pin-modal'},
       e('div',{className:'pin-modal-box'},
