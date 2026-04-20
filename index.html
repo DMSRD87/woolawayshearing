@@ -1589,9 +1589,9 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
         e('div',null,
           e('input',{type:'text',className:'farm-search',placeholder:'🔍 Search farms...',onInput:handleFarmSearch}),
           e('div',{className:'farm-list',style:{borderRadius:'0 0 8px 8px'}},
-            (()=>{const vf=farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList;return vf.length>0?vf.map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},
-                  e('div',{className:'fo-name'},f.name),e('div',{className:'fo-addr'},f.address)))
-              :e('div',{style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match — add one below'));})(),
+            ...(farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList).length>0
+              ?(farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList).map(f=>e('div',{key:f.id,className:`farm-opt${farmId===f.id?' sel':''}`,onClick:()=>setFarmId(f.id)},e('div',{className:'fo-name'},f.name),e('div',{className:'fo-addr'},f.address)))
+              :[e('div',{key:'nf',style:{padding:'12px',color:'var(--dim)',fontSize:'13px',textAlign:'center'}},'No farms match — add one below')]),
           !showAddFarm&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddFarm(true)},'+ Add New Farm'),
           showAddFarm&&e(AddFarmForm,{key:'add-farm',onAdd:handleAddFarm,onCancel:()=>setShowAddFarm(false)})
         )
