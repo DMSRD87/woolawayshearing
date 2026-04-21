@@ -1616,7 +1616,7 @@ function JobCardView({job,crewId,onClose}){
   ));
 }
 /* ── SMS MODAL ── */
-function buildJobCardSMS(job,crewId,farmList,crewList){
+function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
   const gcl=id=>crewList.find(c=>c.id===id);
   const gfl=id=>farmList.find(f=>f.id===id);
   const farm=gfl(job.farmId);
@@ -1624,30 +1624,48 @@ function buildJobCardSMS(job,crewId,farmList,crewList){
   if(!crew)return null;
   const endDate=addDays(job.startDate,job.daysAllocated-1);
   const teamNames=job.crew.map(id=>gcl(id)).filter(Boolean).map(c=>c.name+' ('+c.role+')').join(', ');
+  const jobName=job.jobName||(farm?farm.name:'Farm');
   return [
-    'Hi '+crew.name.split(' ')[0]+'! You have been added to a job with '+CONTRACTOR_NAME+'.',
+    'Hi '+crew.name.split(' ')[0]+'! You\'ve been added to a job with '+CONTRACTOR_NAME+'.',
     '',
-    'JOB: '+(farm?farm.name:'Farm'),
-    'TYPE: '+job.type,
-    'START: '+fmtDate(job.startDate),
-    'END: '+fmtDate(endDate),
-    'SHEEP: '+job.totalSheep.toLocaleString(),
-    'ACCOMM: '+(job.accommodation||'TBC'),
-    'EVOS: '+job.evos,
+    '📋 '+jobName+' — '+job.type,
+    'Start: '+fmtDate(job.startDate)+'  End: '+fmtDate(endDate),
+    'Sheep: '+job.totalSheep.toLocaleString(),
+    farm?'Address: '+farm.address:'',
     '',
-    'YOUR TEAM: '+teamNames,
-    '',
-    farm?'ADDRESS: '+farm.address:'',
-    '',
+    '👉 View job details: '+appUrl,
     'Questions? Reply to this message.',
     '— '+CONTRACTOR_NAME+' via myGang'
-  ].filter(l=>l!==null).join('\n');
+  ].filter(l=>l!==null&&l!=='').join('\n');
+}
+
+function buildFarmerSMS(job,farmerName,farmerPhone,farmList,appUrl){
+  const farm=farmList.find(f=>f.id===job.farmId);
+  const jobName=job.jobName||(farm?farm.name:'Farm');
+  const endDate=addDays(job.startDate,job.daysAllocated-1);
+  return [
+    'Hi '+farmerName+'! '+CONTRACTOR_NAME+' has you scheduled for shearing.',
+    '',
+    '🐑 '+jobName+' — '+job.type,
+    'Start: '+fmtDate(job.startDate)+'  End: '+fmtDate(endDate),
+    'Sheep: '+job.totalSheep.toLocaleString(),
+    farm?'Address: '+farm.address:'',
+    '',
+    '👉 View job details: '+appUrl,
+    '',
+    'Questions? Call or reply to this message.',
+    '— '+CONTRACTOR_NAME+' via myGang'
+  ].filter(l=>l!==null&&l!=='').join('\n');
 }
 
 function SMSModal({job,onClose,onPreview,farmList,crewList}){
   const gfl=id=>farmList?farmList.find(f=>f.id===id):null;
   const gcl=id=>crewList?crewList.find(c=>c.id===id):null;
   const farm=gfl(job.farmId);
+  const appUrl=window.location.origin;
+  const [farmerName,setFarmerName]=useState('');
+  const [farmerPhone,setFarmerPhone]=useState('');
+  const [sendToFarmer,setSendToFarmer]=useState(false);
   const [status,setStatus]=useState('idle'); /* idle | sending | done | error */
   const [results,setResults]=useState([]);
   const [sentCount,setSentCount]=useState(0);
@@ -1657,8 +1675,12 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
     const messages=job.crew.map(id=>{
       const c=gcl(id);
       if(!c||!c.phone)return null;
-      return{to:c.phone,body:buildJobCardSMS(job,id,farmList,crewList)};
+      return{to:c.phone,body:buildJobCardSMS(job,id,farmList,crewList,appUrl)};
     }).filter(Boolean);
+
+    if(sendToFarmer&&farmerPhone&&farmerName){
+      messages.push({to:farmerPhone,body:buildFarmerSMS(job,farmerName,farmerPhone,farmList,appUrl)});
+    }
 
     if(messages.length===0){setStatus('error');return;}
 
@@ -1728,7 +1750,22 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
     ),
     e('div',{className:'sheet-footer'},
       e('button',{className:'btn-g',onClick:onClose},status==='idle'?'Cancel':'Close'),
-      status==='idle'&&crewWithPhone.length>0&&e('button',{className:'btn-p',onClick:doSend},'Send to '+crewWithPhone.length+' crew')
+      status==='idle'&&e('div',null,
+      e('div',{style:{padding:'12px 16px',marginBottom:8,background:'var(--card)',borderRadius:10,border:'1px solid var(--border)'}},
+        e('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:sendToFarmer?10:0}},
+          e('button',{type:'button',onClick:()=>setSendToFarmer(p=>!p),style:{width:22,height:22,borderRadius:4,border:'2px solid var(--amber)',background:sendToFarmer?'var(--amber)':'none',cursor:'pointer',flexShrink:0}}),
+          e('div',{style:{fontWeight:700,fontSize:14}},'Also send to farmer')
+        ),
+        sendToFarmer&&e('div',{style:{display:'flex',flexDirection:'column',gap:8,marginTop:8}},
+          e('input',{type:'text',className:'fi',placeholder:'Farmer name (e.g. John Smith)',value:farmerName,onChange:ev=>setFarmerName(ev.target.value)}),
+          e('input',{type:'tel',className:'fi',placeholder:'Farmer mobile (04XX XXX XXX)',value:farmerPhone,onChange:ev=>setFarmerPhone(ev.target.value)})
+        )
+      ),
+      crewWithPhone.length>0&&e('button',{className:'btn-p',onClick:doSend,style:{width:'100%'}},
+        'Send to '+crewWithPhone.length+' crew'+(sendToFarmer&&farmerPhone?' + farmer':'')
+      ),
+      crewWithPhone.length===0&&e('div',{style:{textAlign:'center',color:'var(--muted)',fontSize:13,padding:'8px 0'}},'No crew have phone numbers saved.')
+    )
     )
   ));
 }
