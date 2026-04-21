@@ -1721,7 +1721,7 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
     'Sheep: '+job.totalSheep.toLocaleString(),
     farm?'Address: '+farm.address:'',
     '',
-    '👉 View job details: '+appUrl+'#job='+job.id,
+    '👉 View job details: '+appUrl+'#job='+job.id+'&crew='+crewId,
     'Do not reply to this message — contact me directly.',
     '— '+CONTRACTOR_NAME+' via myGang'
   ].filter(l=>l!==null&&l!=='').join('\n');
@@ -1757,6 +1757,27 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
   const [status,setStatus]=useState('idle'); /* idle | sending | done | error */
   const [results,setResults]=useState([]);
   const [sentCount,setSentCount]=useState(0);
+  const [views,setViews]=useState({});
+
+  useEffect(()=>{
+    const fetchViews=async()=>{
+      try{
+        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG);
+        if(data){const v={};data.forEach(r=>{v[r.crew_id]=r.viewed_at;});setViews(v);}
+      }catch(e){}
+    };
+    fetchViews();
+    const timer=setInterval(fetchViews,30000);
+    return()=>clearInterval(timer);
+  },[job.id]);
+
+  const fmtViewed=ts=>{
+    const diff=Math.floor((Date.now()-new Date(ts))/1000);
+    if(diff<60)return 'just now';
+    if(diff<3600)return Math.floor(diff/60)+'m ago';
+    if(diff<86400)return Math.floor(diff/3600)+'h ago';
+    return Math.floor(diff/86400)+'d ago';
+  };
 
   const doSend=async()=>{
     setStatus('sending');
@@ -1804,16 +1825,21 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
         crewNoPhone.length>0&&e('div',{style:{padding:'6px 16px',fontSize:'12px',color:'var(--red)',fontWeight:600}},'⚠ '+crewNoPhone.length+' crew have no phone number — add in Admin → Crew Details'),
         job.crew.map(id=>{
           const c=gcl(id);if(!c)return null;
+          const viewedAt=views[id];
           return e('div',{key:id,className:'sms-row'},
             e('div',{className:'sms-l'},
               e(Av,{name:c.name,size:40}),
               e('div',null,
                 e('div',{className:'sms-name'},c.name),
                 e('div',{className:'sms-role'},c.role),
-                e('div',{className:'sms-ph'},c.phone||e('span',{style:{color:'var(--red)'}},`No number`))
+                e('div',{className:'sms-ph'},c.phone||e('span',{style:{color:'var(--red)'}},'No number')),
+                viewedAt&&e('div',{style:{fontSize:11,color:'var(--green)',fontWeight:700,marginTop:2}},'👁 Viewed '+fmtViewed(viewedAt))
               )
             ),
-            c.phone&&e('button',{className:'prev-btn',onClick:()=>onPreview(id)},'Preview')
+            e('div',{style:{display:'flex',flexDirection:'column',gap:4,alignItems:'flex-end'}},
+              c.phone&&e('button',{className:'prev-btn',onClick:()=>onPreview(id)},'Preview'),
+              !viewedAt&&c.phone&&e('div',{style:{fontSize:10,color:'var(--muted)'}},status==='done'||status==='partial'?'Not yet opened':'')
+            )
           );
         })
       ),
@@ -2456,13 +2482,25 @@ function App(){
       setLoadedFromCache(fromCache);
       setLoading(false);isLoaded.current=true;
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
-      /* Deep link: #job=JOB_ID opens that job on Overview tab */
+      /* Deep link: #job=JOB_ID&crew=CREW_ID opens that job on Overview tab and logs view */
       const hash=window.location.hash;
-      const m=hash.match(/#job=(.+)/);
-      if(m){
-        const jid=m[1];
+      const jobMatch=hash.match(/[#&]job=([^&]+)/);
+      const crewMatch=hash.match(/[#&]crew=([^&]+)/);
+      if(jobMatch){
+        const jid=jobMatch[1];
+        const cid=crewMatch?crewMatch[1]:null;
         const found=j.find(x=>x.id===jid);
         if(found){setSelJobId(jid);setScreen('job');setDeepLinkTab('overview');}
+        /* Log the view to Supabase */
+        if(jid&&cid){
+          sb.from('job_views').upsert({
+            id:jid+'_'+cid,
+            contractor_slug:CONTRACTOR_SLUG,
+            job_id:jid,
+            crew_id:cid,
+            viewed_at:new Date().toISOString()
+          },{onConflict:'id'}).catch(()=>{});
+        }
         window.location.hash='';
       }
     }).catch(()=>{setLoading(false);isLoaded.current=true;});
