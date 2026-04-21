@@ -1634,7 +1634,7 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
     farm?'Address: '+farm.address:'',
     '',
     '👉 View job details: '+appUrl,
-    'Questions? Reply to this message.',
+    'Do not reply to this message — contact me directly.',
     '— '+CONTRACTOR_NAME+' via myGang'
   ].filter(l=>l!==null&&l!=='').join('\n');
 }
@@ -1662,7 +1662,7 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
   const gfl=id=>farmList?farmList.find(f=>f.id===id):null;
   const gcl=id=>crewList?crewList.find(c=>c.id===id):null;
   const farm=gfl(job.farmId);
-  const appUrl=window.location.origin;
+  const appUrl=CONTRACTOR_URL;
   const [farmerName,setFarmerName]=useState('');
   const [farmerPhone,setFarmerPhone]=useState('');
   const [sendToFarmer,setSendToFarmer]=useState(false);
@@ -2327,6 +2327,7 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
 
 /* ── APP ── */
 const CONTRACTOR_NAME='Woolaway Shearing';
+const CONTRACTOR_URL='https://woolawayshearing.vercel.app';
 function App(){
   const [appUnlocked,setAppUnlocked]=useState(true);
   const [loading,setLoading]=useState(true);
