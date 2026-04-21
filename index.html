@@ -546,9 +546,14 @@ function localToday(){const n=new Date();return `${n.getFullYear()}-${String(n.g
 function jobDates(j){const ds=[];for(let i=0;i<j.daysAllocated;i++)ds.push(addDays(j.startDate,i));return ds;}
 const mobsOf=run=>run.mobs||[];
 function calcProg(job){
-  const shIds=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  /* Include both shearers and crutchers in progress count */
+  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   let shorn=0,daysWorked=0;
   Object.entries(job.runs||{}).forEach(([,rs])=>{if(rs&&rs.length){daysWorked++;rs.forEach(run=>{mobsOf(run).forEach(mob=>{shIds.forEach(id=>{shorn+=mob.counts[id]||0;});});});}});
+  /* Also count any counts regardless of role if no shearers/crutchers found */
+  if(shIds.length===0){
+    Object.entries(job.runs||{}).forEach(([,rs])=>{if(rs&&rs.length){rs.forEach(run=>{mobsOf(run).forEach(mob=>{Object.values(mob.counts||{}).forEach(c=>{shorn+=c||0;});});});}});
+  }
   return{shorn,pct:job.totalSheep>0?Math.min(shorn/job.totalSheep*100,100):0,daysWorked,shIds};
 }
 function shearerStats(job,viewDate,shIds){
