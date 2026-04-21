@@ -1151,7 +1151,8 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
             e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Today'),
               canEditTravel
                 ?e('button',{
-                    onClick:()=>setTravel(id,todayTravel?0:1),
+                    type:'button',
+                    onClick:ev=>{ev.stopPropagation();setTravel(id,todayTravel?0:1);},
                     style:{padding:'4px 12px',borderRadius:8,fontWeight:700,fontSize:13,cursor:'pointer',border:'none',
                       background:todayTravel?'var(--amber)':'var(--card2)',color:todayTravel?'#000':'var(--muted)'}
                   },todayTravel?'✓ Yes':'No')
