@@ -419,6 +419,9 @@ const LS_JOBS='mg_jobs_'+CONTRACTOR_SLUG;
 const LS_FARMS='mg_farms_'+CONTRACTOR_SLUG;
 const LS_CREW='mg_crew_'+CONTRACTOR_SLUG;
 const LS_QUEUE='mg_queue_'+CONTRACTOR_SLUG;
+const LS_ROLE='mg_role_'+CONTRACTOR_SLUG;
+const LS_ROLE_TS='mg_role_ts_'+CONTRACTOR_SLUG;
+const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
 
 const lsGet=k=>{try{return JSON.parse(localStorage.getItem(k)||'null');}catch{return null;}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){console.warn('localStorage full',e);}};
@@ -781,12 +784,12 @@ async function savePin(type,newVal){
 }
 
 /* ── PIN PAD (reusable) ── */
-function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_overridePin}){
+function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_overridePin,_startInChangeMode,_pinType,_onChanged}){
   const [entry,setEntry]=useState('');
   const [err,setErr]=useState('');
-  const [changing,setChanging]=useState(false);
+  const [changing,setChanging]=useState(!!_startInChangeMode);
   const [newPin,setNewPin]=useState('');
-  const [step,setStep]=useState('enter'); /* enter | verify_current | new1 | new2 */
+  const [step,setStep]=useState(_startInChangeMode?'new1':'enter'); /* enter | verify_current | new1 | new2 */
 
   const type=label==='Admin PIN'?'admin':'lead';
 
@@ -817,8 +820,12 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
         setEntry(conf);
         if(conf.length===6){
           if(conf===newPin){
-            savePin(type,newPin).then(()=>{
+            const pinType=_pinType||type;
+            savePin(pinType,newPin).then(()=>{
               setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('✓ PIN changed — all devices updated!');
+              if(_onChanged)setTimeout(_onChanged,1500);
+              /* Reset role on PIN change for security */
+              lsSet(LS_ROLE,'read_only');lsSet(LS_ROLE_TS,0);
             });
           } else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
         }
@@ -874,7 +881,7 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
 function AdminPinModal({onSuccess,onClose}){
   return e('div',{className:'pin-modal'},
     e('div',{className:'pin-modal-box'},
-      e(PinPad,{label:'Admin PIN',subtitle:'Enter admin PIN to continue',onSuccess,onCancel:onClose,allowChange:true,changeLabel:'Change Admin PIN'})
+      e(PinPad,{label:'Admin PIN',subtitle:'Enter admin PIN to continue',onSuccess,onCancel:onClose,allowChange:false})
     )
   );
 }
@@ -886,10 +893,14 @@ function TopBar({role,setRole,onBack,backLabel}){
     else if(rv==='admin'&&role!=='admin')setShowPin('admin');
     else setRole(rv);
   };
+  const lockRole=()=>{setRole('read_only');lsSet(LS_ROLE,'read_only');lsSet(LS_ROLE_TS,0);};
   return e('div',null,
     e('div',{className:'topbar'},
       onBack?e('button',{className:'back-btn',onClick:onBack},e('span',{className:'back-arr'},'←'),e('span',{className:'back-label'},backLabel||'Back')):e('div',{className:'logo'},'my',e('em',null,'Gang')),
-      e('div',{className:'role-toggle'},[['👁','View','read_only'],['📋','Lead','shed_lead'],['🔑','Admin','admin']].map(([ic,lbl,rv])=>e('button',{key:rv,className:`rt-btn${role===rv?' active':''}`,onClick:()=>requestRole(rv)},`${ic} ${lbl}`)))
+      e('div',{style:{display:'flex',alignItems:'center',gap:6}},
+        role!=='read_only'&&e('button',{onClick:lockRole,title:'Lock',style:{background:'rgba(255,255,255,.1)',border:'none',borderRadius:6,padding:'4px 8px',color:'rgba(255,255,255,.5)',fontSize:14,cursor:'pointer'}},'🔒'),
+        e('div',{className:'role-toggle'},[['👁','View','read_only'],['📋','Lead','shed_lead'],['🔑','Admin','admin']].map(([ic,lbl,rv])=>e('button',{key:rv,className:`rt-btn${role===rv?' active':''}`,onClick:()=>requestRole(rv)},`${ic} ${lbl}`)))
+      )
     ),
     showPin&&e('div',{className:'pin-modal'},
       e('div',{className:'pin-modal-box'},
@@ -898,8 +909,7 @@ function TopBar({role,setRole,onBack,backLabel}){
           subtitle:showPin==='admin'?'Enter admin PIN to unlock':'Enter PIN to unlock shed lead',
           onSuccess:()=>{setRole(showPin==='admin'?'admin':'shed_lead');setShowPin(null);},
           onCancel:()=>setShowPin(null),
-          allowChange:true,
-          changeLabel:'Change '+(showPin==='admin'?'Admin':'Lead')+' PIN',
+          allowChange:false,
         })
       )
     )
@@ -1183,6 +1193,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
   const [confirmDelete,setConfirmDelete]=useState(false);
   const [confirmDeleteJob,setConfirmDeleteJob]=useState(false);
   const [saved,setSaved]=useState(false);
+  const [showChangePinType,setShowChangePinType]=useState(null); /* 'lead' | 'admin' | null */
 
   /* Local draft — only commits to job on Save */
   const [draft,setDraft]=useState(()=>({...mkRates(),...(job.rates||{})}));
@@ -1361,6 +1372,32 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
     /* SAVE BUTTON */
     e('div',{className:'admin-section'},
       e('button',{className:'btn-p',onClick:doSave,style:{width:'100%',fontSize:16,padding:'14px'}},saved?'✓ Saved!':'💾 Save Rate Changes')
+    ),
+
+    /* CHANGE PINs — admin only, after login */
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'PIN Management'),e('div',{className:'admin-sec-sub'},'Change access PINs — admin only')),
+      e('div',{style:{display:'flex',gap:10}},
+        e('button',{className:'btn-g',style:{flex:1},onClick:()=>setShowChangePinType('lead')},'Change Lead PIN'),
+        e('button',{className:'btn-g',style:{flex:1},onClick:()=>setShowChangePinType('admin')},'Change Admin PIN')
+      )
+    ),
+
+    /* CHANGE PIN MODAL */
+    showChangePinType&&e('div',{className:'pin-modal'},
+      e('div',{className:'pin-modal-box'},
+        e(PinPad,{
+          label:showChangePinType==='admin'?'Admin PIN':'Lead PIN',
+          subtitle:'Change '+showChangePinType+' PIN',
+          onSuccess:()=>{},
+          onCancel:()=>setShowChangePinType(null),
+          allowChange:true,
+          changeLabel:'Set New '+(showChangePinType==='admin'?'Admin':'Lead')+' PIN',
+          _startInChangeMode:true,
+          _pinType:showChangePinType,
+          _onChanged:()=>setShowChangePinType(null),
+        })
+      )
     ),
 
     /* DANGER ZONE */
@@ -2087,8 +2124,16 @@ function App(){
   const [isOnline,setIsOnline]=useState(navigator.onLine);
   const [pendingCount,setPendingCount]=useState(0);
   const [loadedFromCache,setLoadedFromCache]=useState(false);
-  const [role,setRole]=useState('read_only');
+  /* Restore role from localStorage if within timeout */
+  const [role,setRole]=useState(()=>{
+    const saved=lsGet(LS_ROLE);
+    const ts=lsGet(LS_ROLE_TS)||0;
+    const hours=(Date.now()-ts)/(1000*60*60);
+    if(saved&&saved!=='read_only'&&hours<ROLE_TIMEOUT_HOURS)return saved;
+    return 'read_only';
+  });
   const [screen,setScreen]=useState('home');
+  const persistRole=r=>{setRole(r);lsSet(LS_ROLE,r);lsSet(LS_ROLE_TS,Date.now());};
   const [selJobId,setSelJobId]=useState(null);
   const [jobs,setJobs]=useState([]);
   const [farmList,setFarmList]=useState([]);
@@ -2203,8 +2248,8 @@ function App(){
 
   return e('div',{style:{paddingTop:!isOnline?20:0}},
     e(StatusBar),
-    screen==='home'&&e(HomeScreen,{jobs,role,setRole,onJob:goJob,onNew:()=>setShowNew(true),onDatabase:()=>setShowDatabase(true),contractorName:CONTRACTOR_NAME}),
-    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl,onEdit:()=>setShowEdit(true),onDeleteJob:async()=>{await dbDeleteJob(selJob.id);setJobs(p=>p.filter(j=>j.id!==selJob.id));goHome();}}),
+    screen==='home'&&e(HomeScreen,{jobs,role,setRole:persistRole,onJob:goJob,onNew:()=>setShowNew(true),onDatabase:()=>setShowDatabase(true),contractorName:CONTRACTOR_NAME}),
+    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole:persistRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl,onEdit:()=>setShowEdit(true),onDeleteJob:async()=>{await dbDeleteJob(selJob.id);setJobs(p=>p.filter(j=>j.id!==selJob.id));goHome();}}),
     showSMS&&selJob&&e(SMSModal,{job:selJob,onClose:()=>{setShowSMS(false);setPreviewId(null);},onPreview:id=>setPreviewId(id),farmList,crewList}),
     previewId&&selJob&&e(JobCardView,{job:selJob,crewId:previewId,onClose:()=>setPreviewId(null),gfl,gcl}),
     showDatabase&&e(DatabaseScreen,{farmList,crewList,addFarm,addCrew,setFarmList,setCrewList,onClose:()=>setShowDatabase(false)}),
