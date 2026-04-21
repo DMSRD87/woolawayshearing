@@ -1,5 +1,5 @@
 /* myGang Service Worker — offline-first caching */
-const CACHE = 'mygang-v4';
+const CACHE = 'mygang-v5';
 
 const PRECACHE = [
   '/',
