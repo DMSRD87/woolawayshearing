@@ -1424,7 +1424,7 @@ function OverviewTab({job,role,onSend,canSend,onEditFarm}){
   const IC=({l,v,full})=>e('div',{className:'ic'+(full?' full-ic':'')},e('div',{className:'ic-l'},l),e('div',{className:'ic-v'},v));
   return e('div',null,
     e('div',{style:{height:12}}),
-    e('div',{className:'info-grid'},e(IC,{l:'Job Type',v:job.type}),e(IC,{l:'Total Sheep',v:job.totalSheep.toLocaleString()}),e(IC,{l:'Start Date',v:fmtDateLong(job.startDate)}),e(IC,{l:'Days Allocated',v:job.daysAllocated+' days'}),e(IC,{l:'EVOs',v:job.evos}),e(IC,{l:'Transport',v:job.transport?'✓ Available':'BYO'}),e(IC,{l:'Crutching Trailer',v:job.crutchingTrailer?'✓ Provided':'Not provided'}),e(IC,{l:'Accommodation',v:job.accommodation,full:true})),
+    e('div',{className:'info-grid'},e(IC,{l:'Job Type',v:job.type}),e(IC,{l:'Total Sheep',v:job.totalSheep.toLocaleString()}),e(IC,{l:'Start Date',v:fmtDateLong(job.startDate)}),e(IC,{l:'Days Allocated',v:job.daysAllocated+' days'}),e(IC,{l:'EVOs',v:job.evos||'—'}),e(IC,{l:'Transport',v:job.transport?'✓ Yes':'No'}),e(IC,{l:'Crutching Trailer',v:job.crutchingTrailer?'✓ Provided':'Not provided'}),e(IC,{l:'Meals',v:job.meals||'Not Supplied'}),e(IC,{l:'Accommodation',v:job.accommodation||'—',full:true})),
     job.notes_job&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Notes'),e('div',{className:'ic-v',style:{fontSize:'13px',color:'var(--muted)',fontWeight:400}},job.notes_job))),
     farm&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Farm Address'),e('div',{className:'ic-v'},farm.address),farm.notes&&e('div',{style:{fontSize:'12px',color:'var(--dim)',marginTop:4}},farm.notes),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(farm.address),target:'_blank',className:'map-link'},'📍 Open in Maps')),role==='admin'&&onEditFarm&&e('button',{className:'map-link',style:{marginTop:6,display:'block',color:'var(--amber)',cursor:'pointer',background:'none',border:'none',padding:0,fontSize:13},onClick:onEditFarm},'✏️ Edit farm details')),
     e('div',{className:'crew-hdr'},e('span',null,'Crew — '+job.crew.length)),
@@ -1488,7 +1488,7 @@ function JobCardView({job,crewId,onClose}){
       crew&&e('div',{className:'jcw-greet'},'Hi '+crew.name.split(' ')[0]+','),
       e('div',{className:'jcw-alloc'},'You have been allocated to the job —\n'+(farm?farm.name:'Farm')+' (#'+job.jobNumber+')'),
       e('div',{className:'jcw-title'},'Job Details'),
-      ...[['Job Number',job.jobNumber],['Job Name',farm?farm.name:''],['Job Type',job.type],['Start Date',fmtDate(job.startDate)],['End Date',endD],['Farm Address',farm?farm.address:'',true],['Total Sheep',job.totalSheep.toLocaleString()],['EVOs',job.evos],['Crutching Trailer',job.crutchingTrailer?'Provided':'No crutching trailer'],['Transport',job.transport?'Available':'BYO'],['Accommodation',job.accommodation]].map(([lbl,val,isAddr])=>
+      ...[['Job Number',job.jobNumber],['Job Name',farm?farm.name:''],['Job Type',job.type],['Start Date',fmtDate(job.startDate)],['End Date',endD],['Farm Address',farm?farm.address:'',true],['Total Sheep',job.totalSheep.toLocaleString()],['EVOs',job.evos],['Crutching Trailer',job.crutchingTrailer?'Provided':'Not provided'],['Meals',job.meals||'Not Supplied'],['Transport',job.transport?'Available':'No'],['Accommodation',job.accommodation]].map(([lbl,val,isAddr])=>
         e('div',{key:lbl,className:'jcw-f'},e('div',{className:'jcw-fl'},lbl),isAddr?e('div',null,e('div',{className:'jcw-fv'},val),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(val),target:'_blank',className:'map-btn'},'📍 Open in Maps')):e('div',{className:'jcw-fv'},val))
       ),
       job.notes_job&&e('div',{className:'jcw-f'},e('div',{className:'jcw-fl'},'Further Details'),e('div',{className:'jcw-fv',style:{fontSize:'14px',color:'#444'}},job.notes_job)),
@@ -1686,8 +1686,10 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
   /* Only UI-driving state — NO controlled text inputs */
   const [type,setType]=useState('Shearing');
   const [farmId,setFarmId]=useState('');
-  const [evos,setEvos]=useState('BYO');
-  const [transport,setTransport]=useState(true);
+  const [evos,setEvos]=useState('Supplied at shed');
+  const [transport,setTransport]=useState(false);
+  const [meals,setMeals]=useState('Not Supplied');
+  const [crutchingTrailer,setCrutchingTrailer]=useState(false);
   const [selCrew,setSelCrew]=useState([]);
   const [showAddFarm,setShowAddFarm]=useState(false);
   const [showAddCrew,setShowAddCrew]=useState(false);
@@ -1725,7 +1727,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       startDate,
       daysAllocated:parseInt(days),
       totalSheep:parseInt(sheep),
-      evos,crutchingTrailer:false,transport,
+      evos,crutchingTrailer,transport,meals,
       accommodation:rAccomm.current?.value||'',
       status:'Active',crew:selCrew,
       jobPin:rJobPin.current?.value?.trim()||null,
@@ -1804,8 +1806,10 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
 function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const [farmId,setFarmId]=useState(job.farmId||'');
   const [type,setType]=useState(job.type||'Shearing');
-  const [evos,setEvos]=useState(job.evos||'BYO');
-  const [transport,setTransport]=useState(job.transport!==false);
+  const [evos,setEvos]=useState(job.evos||'Supplied at shed');
+  const [transport,setTransport]=useState(job.transport===true);
+  const [meals,setMeals]=useState(job.meals||'Not Supplied');
+  const [crutchingTrailer,setCrutchingTrailer]=useState(job.crutchingTrailer===true);
   const [farmQuery,setFarmQuery]=useState('');
   const [showAddFarm,setShowAddFarm]=useState(false);
   const [showAddCrew,setShowAddCrew]=useState(false);
@@ -1830,7 +1834,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
       startDate,
       daysAllocated:parseInt(days),
       totalSheep:parseInt(sheep),
-      evos,transport,
+      evos,transport,crutchingTrailer,meals,
       accommodation:rAccomm.current?.value!==undefined?rAccomm.current.value:job.accommodation||'',
       jobPin:rJobPin.current?.value?.trim()||null,
       jobName:rJobName.current?.value?.trim()||'',
@@ -1889,6 +1893,16 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
       e(FF,{label:'Transport'},
         e('div',{className:'tog-row'},...[['Yes',true],['No',false]].map(([l,v])=>
           e('button',{key:l,className:`tog-opt${transport===v?' on':''}`,onClick:()=>setTransport(v)},l)
+        ))
+      ),
+      e(FF,{label:'Crutching Trailer'},
+        e('div',{className:'tog-row'},...[['Provided',true],['Not Provided',false]].map(([l,v])=>
+          e('button',{key:l,className:`tog-opt${crutchingTrailer===v?' on':''}`,onClick:()=>setCrutchingTrailer(v)},l)
+        ))
+      ),
+      e(FF,{label:'Meals'},
+        e('div',{className:'tog-row'},...['Not Supplied','Provided'].map(o=>
+          e('button',{key:o,className:`tog-opt${meals===o?' on':''}`,onClick:()=>setMeals(o)},o)
         ))
       ),
       e(FF,{label:'Accommodation'},
