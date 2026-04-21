@@ -1182,16 +1182,41 @@ function SummaryTab({job}){
 function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
   const [confirmDelete,setConfirmDelete]=useState(false);
   const [confirmDeleteJob,setConfirmDeleteJob]=useState(false);
-  const rates=job.rates||{};
-  const setRate=(k,v)=>setJob(prev=>({...prev,rates:{...prev.rates,[k]:parseFloat(v)||0}}));
-  const setOv=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,crewOverrides:{...(prev.rates.crewOverrides||{}),[cid]:parseFloat(v)||0}}}));
-  const setLoad=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,shearerLoadings:{...(prev.rates.shearerLoadings||{}),[cid]:parseFloat(v)||0}}}));
-  const setTD=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,travelDays:{...(prev.rates.travelDays||{}),[cid]:parseInt(v)||0}}}));
-  const setTR=(cid,v)=>setJob(prev=>({...prev,rates:{...prev.rates,travelRate:{...(prev.rates.travelRate||{}),[cid]:parseFloat(v)||0}}}));
+  const [saved,setSaved]=useState(false);
+
+  /* Local draft — only commits to job on Save */
+  const [draft,setDraft]=useState(()=>({...mkRates(),...(job.rates||{})}));
+  const set=(k,v)=>setDraft(p=>({...p,[k]:v}));
+  const setOv=(id,v)=>setDraft(p=>({...p,crewOverrides:{...(p.crewOverrides||{}),[id]:v===''?undefined:parseFloat(v)||0}}));
+  const setLoad=(id,v)=>setDraft(p=>({...p,shearerLoadings:{...(p.shearerLoadings||{}),[id]:v===''?0:parseFloat(v)||0}}));
+  const setTD=(id,v)=>setDraft(p=>({...p,travelDays:{...(p.travelDays||{}),[id]:parseInt(v)||0}}));
+  const setTR=(id,v)=>setDraft(p=>({...p,travelRate:{...(p.travelRate||{}),[id]:parseFloat(v)||0}}));
+  const setDet=(id,k,v)=>setDraft(p=>({...p,crewDetails:{...(p.crewDetails||{}),[id]:{...(p.crewDetails||{})[id],[k]:v}}}));
+
+  const doSave=()=>{
+    setJob(prev=>({...prev,rates:draft}));
+    setSaved(true);setTimeout(()=>setSaved(false),2000);
+  };
+
   const shearers=job.crew.filter(id=>gc(id)?.role==='Shearer');
-  const shedStaff=job.crew.filter(id=>gc(id)?.role!=='Shearer');
-  const RCell=({lbl,k,hi,prefix})=>e('div',{className:`rate-cell${hi?' amber-bg':''}`},e('div',{className:`rate-lbl${hi?' hi':''}`},lbl),e('div',{className:'rate-inp-row'},prefix&&e('span',{className:'rate-prefix'},prefix),e('input',{type:'number',className:`rate-inp${hi?' hi':''}`,value:rates[k]||'',step:'0.05',onChange:ev=>setRate(k,ev.target.value)})));
+  const crutchers=job.crew.filter(id=>gc(id)?.role==='Crutcher');
+  const loadingCrew=[...shearers,...crutchers]; /* shearers + crutchers get $/head loadings */
+  const shedStaff=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
+  const DAY_FULL_=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+  const RInp=({k,placeholder,step,prefix,suffix,hi})=>e('div',{className:'rate-inp-row'},
+    prefix&&e('span',{className:'rate-prefix'},prefix),
+    e('input',{type:'number',className:`rate-inp${hi?' hi':''}`,value:draft[k]??'',placeholder,step:step||'0.05',
+      onChange:ev=>set(k,ev.target.value===''?0:parseFloat(ev.target.value)||0)}),
+    suffix&&e('span',{style:{fontSize:11,color:'var(--muted)',marginLeft:4}},suffix)
+  );
+  const RCell=({lbl,k,hi,prefix,suffix})=>e('div',{className:`rate-cell${hi?' amber-bg':''}`},
+    e('div',{className:`rate-lbl${hi?' hi':''}`},lbl),
+    e(RInp,{k,prefix,suffix,hi,step:'0.05'})
+  );
+
   return e('div',{className:'admin-wrap'},
+    /* JOB DETAILS */
     e('div',{className:'admin-section'},
       e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Job Details')),
       e('button',{className:'btn-p',onClick:onEdit,style:{width:'100%',marginBottom:8}},'✏️ Edit Job Details'),
@@ -1205,79 +1230,143 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
         )
       )
     ),
-    e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shearer Base Rates')),e('div',{className:'rate-grid'},e(RCell,{lbl:'Shearing $/head',k:'shearingPerHead',prefix:'$'}),e(RCell,{lbl:'Crutching $/head',k:'crutchingPerHead',prefix:'$'}))),
-    e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shed Staff Rates'),e('div',{className:'admin-sec-sub'},'Per run. Presser switches to per-bale at threshold.')),e('div',{className:'rate-grid'},e(RCell,{lbl:'Wool Handler',k:'woolHandlerPerRun',prefix:'$'}),e(RCell,{lbl:'Classer',k:'classerPerRun',prefix:'$'}),e(RCell,{lbl:'Penner',k:'pennerPerRun',prefix:'$'}),e(RCell,{lbl:'Presser (per run)',k:'presserPerRun',prefix:'$'}),e(RCell,{lbl:'Presser $/bale',k:'presserPerBale',prefix:'$',hi:true}),e(RCell,{lbl:'Bale threshold/day',k:'baleThreshold',hi:true}))),
-    shedStaff.length>0&&e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Per Person Rate Overrides'),e('div',{className:'admin-sec-sub'},'Override default $/run for individuals')),shedStaff.map(id=>{const c=gc(id);if(!c)return null;const cur=(rates.crewOverrides||{})[id]||'';const defR=c.role==='Wool Classer'?rates.classerPerRun:c.role==='Penner'?rates.pennerPerRun:c.role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;return e('div',{key:id,className:'loading-row'},e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+' — default $'+defR+'/run'))),e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:defR,step:'1',onChange:ev=>setOv(id,ev.target.value)}),e('span',{className:'lr-unit'},'/run')));})),
-    shearers.length>0&&e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shearer Rate Loadings'),e('div',{className:'admin-sec-sub'},'Added on top of base rate per head — entire job')),shearers.map(id=>{const c=gc(id);if(!c)return null;const cur=(rates.shearerLoadings||{})[id]||0;return e('div',{key:id,className:'loading-row'},e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},'Shearer'))),e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'+$'),e('input',{type:'number',className:'lr-inp',value:cur||'',placeholder:'0',step:'0.05',onChange:ev=>setLoad(id,ev.target.value)}),e('span',{className:'lr-unit'},'/head')));})),
-    e('div',{className:'admin-section'},e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Travel'),e('div',{className:'admin-sec-sub'},'Days × daily rate per person (used in pay summary)')),
-      job.crew.map(id=>{const c=gc(id);if(!c)return null;const days=(rates.travelDays||{})[id]||'';const rate=(rates.travelRate||{})[id]||'';return e('div',{key:id,className:'loading-row'},e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),e('div',{className:'lr-r',style:{gap:8}},e('span',{style:{display:'flex',alignItems:'center',gap:3}},e('input',{type:'number',className:'tr-inp',value:days,placeholder:'0',min:0,onChange:ev=>setTD(id,ev.target.value)}),e('span',{className:'tr-unit'},'days')),e('span',{style:{display:'flex',alignItems:'center',gap:3}},e('span',{className:'lr-prefix'},'$'),e('input',{type:'number',className:'tr-inp',style:{width:52},value:rate,placeholder:'40',step:'5',onChange:ev=>setTR(id,ev.target.value)}),e('span',{className:'tr-unit'},'/day'))));})
-    ),
+
+    /* SHEARER BASE RATES */
     e('div',{className:'admin-section'},
-      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Crew Details'),e('div',{className:'admin-sec-sub'},'Phone, vehicle, tax withholding & role for each crew member')),
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shearer Base Rates')),
+      e('div',{className:'rate-grid'},e(RCell,{lbl:'Shearing $/head',k:'shearingPerHead',prefix:'$'}),e(RCell,{lbl:'Crutching $/head',k:'crutchingPerHead',prefix:'$'}))
+    ),
+
+    /* SHED STAFF RATES */
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Shed Staff Rates'),e('div',{className:'admin-sec-sub'},'Per run. Presser switches to per-bale at threshold.')),
+      e('div',{className:'rate-grid'},
+        e(RCell,{lbl:'Wool Handler',k:'woolHandlerPerRun',prefix:'$'}),
+        e(RCell,{lbl:'Classer',k:'classerPerRun',prefix:'$'}),
+        e(RCell,{lbl:'Penner',k:'pennerPerRun',prefix:'$'}),
+        e(RCell,{lbl:'Presser (per run)',k:'presserPerRun',prefix:'$'}),
+        e(RCell,{lbl:'Presser $/bale',k:'presserPerBale',prefix:'$',hi:true}),
+        e(RCell,{lbl:'Bale threshold/day',k:'baleThreshold',hi:true})
+      )
+    ),
+
+    /* PER PERSON OVERRIDES */
+    shedStaff.length>0&&e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Per Person Rate Overrides'),e('div',{className:'admin-sec-sub'},'Override default $/run for individuals')),
+      shedStaff.map(id=>{
+        const c=gc(id);if(!c)return null;
+        const cur=(draft.crewOverrides||{})[id]??'';
+        const defR=c.role==='Wool Classer'?draft.classerPerRun:c.role==='Penner'?draft.pennerPerRun:c.role==='Presser'?draft.presserPerRun:draft.woolHandlerPerRun;
+        return e('div',{key:id,className:'loading-row'},
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+' — default $'+defR+'/run'))),
+          e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:defR,step:'1',onChange:ev=>setOv(id,ev.target.value)}),e('span',{className:'lr-unit'},'/run'))
+        );
+      })
+    ),
+
+    /* RATE LOADINGS — shearers + crutchers, $/head */
+    loadingCrew.length>0&&e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Rate Loadings'),e('div',{className:'admin-sec-sub'},'Added on top of base rate $/head — entire job')),
+      loadingCrew.map(id=>{
+        const c=gc(id);if(!c)return null;
+        const cur=(draft.shearerLoadings||{})[id]??'';
+        return e('div',{key:id,className:'loading-row'},
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),
+          e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'+$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:'0',step:'0.05',onChange:ev=>setLoad(id,ev.target.value)}),e('span',{className:'lr-unit'},'/head'))
+        );
+      })
+    ),
+
+    /* TRAVEL */
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Travel'),e('div',{className:'admin-sec-sub'},'Days × daily rate per person')),
       job.crew.map(id=>{
         const c=gc(id);if(!c)return null;
-        const det=(rates.crewDetails||{})[id]||{};
-        const setDet=(k,v)=>setJob(prev=>({...prev,rates:{...prev.rates,crewDetails:{...(prev.rates.crewDetails||{}),[id]:{...(prev.rates.crewDetails||{})[id],[k]:v}}}}));
-        const phone=det.phone!=null?det.phone:(c.phone||'');
-        const hasCar=det.hasVehicle!=null?det.hasVehicle:c.hasVehicle;
-        const taxRate=det.taxRate!=null?det.taxRate:'';
-        const role=det.role||c.role;
-        const ROLES=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
-        return e('div',{key:id,className:'crew-detail-row'},
-          e('div',{className:'cd-top'},
-            e(Av,{name:c.name,size:36}),
-            e('div',{className:'cd-name'},c.name),
-            e('button',{className:`cd-car-btn${hasCar?' on':''}`,onClick:()=>setDet('hasVehicle',!hasCar)},hasCar?'🚗 Has car':'🚗 No car')
-          ),
-          e('div',{className:'cd-fields'},
-            e('div',{className:'cd-field'},e('div',{className:'cd-lbl'},'Mobile'),e('input',{type:'tel',className:'cd-inp',placeholder:'04XX XXX XXX',value:phone,onChange:ev=>setDet('phone',ev.target.value)})),
-            e('div',{className:'cd-field'},e('div',{className:'cd-lbl'},'Role'),e('select',{className:'cd-role-sel',value:role,onChange:ev=>setDet('role',ev.target.value)},ROLES.map(r=>e('option',{key:r,value:r},r)))),
-            e('div',{className:'cd-field'},
-              e('div',{className:'cd-lbl'},'Tax Withholding %'),
-              e('input',{type:'number',className:'cd-inp',placeholder:'e.g. 19',value:taxRate,min:0,max:47,step:1,onChange:ev=>setDet('taxRate',ev.target.value)}),
-              taxRate&&e('div',{className:'tax-note'},'Net ≈ '+(100-parseFloat(taxRate||0)).toFixed(0)+'% of gross')
+        const days=(draft.travelDays||{})[id]??'';
+        const rate=(draft.travelRate||{})[id]??'';
+        return e('div',{key:id,className:'loading-row'},
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),
+          e('div',{className:'lr-r',style:{gap:8}},
+            e('span',{style:{display:'flex',alignItems:'center',gap:3}},
+              e('input',{type:'number',className:'tr-inp',value:days,placeholder:'0',min:0,onChange:ev=>setTD(id,ev.target.value)}),
+              e('span',{className:'tr-unit'},'days')
             ),
-            e('div',{className:'cd-field'},e('div',{className:'cd-lbl'},'Tax Note'),e('div',{style:{fontSize:'11px',color:'var(--dim)',paddingTop:4,lineHeight:1.5}},'Applied to pay summary as deduction. Gross pay always shown separately.'))
+            e('span',{style:{display:'flex',alignItems:'center',gap:3}},
+              e('span',{className:'lr-prefix'},'$'),
+              e('input',{type:'number',className:'tr-inp',style:{width:52},value:rate,placeholder:'40',step:'5',onChange:ev=>setTR(id,ev.target.value)}),
+              e('span',{className:'tr-unit'},'/day')
+            )
           )
         );
       })
     ),
+
+    /* CREW DETAILS */
     e('div',{className:'admin-section'},
-      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Pay Settings'),e('div',{className:'admin-sec-sub'},'Crew pay cycle — controls how Summary tab filters pay periods')),
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Crew Details'),e('div',{className:'admin-sec-sub'},'Phone, vehicle, tax withholding & role')),
+      job.crew.map(id=>{
+        const c=gc(id);if(!c)return null;
+        const det=(draft.crewDetails||{})[id]||{};
+        const phone=det.phone!=null?det.phone:(c.phone||'');
+        const hasCar=det.hasVehicle!=null?det.hasVehicle:c.hasVehicle;
+        const taxRate=det.taxRate??'';
+        const role=det.role||c.role;
+        const ROLES=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
+        return e('div',{key:id,className:'crew-detail-row'},
+          e('div',{className:'cd-top'},e(Av,{name:c.name,size:36}),e('div',{className:'cd-name'},c.name),e('button',{className:`cd-car-btn${hasCar?' on':''}`,onClick:()=>setDet(id,'hasVehicle',!hasCar)},hasCar?'🚗 Has car':'🚗 No car')),
+          e('div',{className:'cd-fields'},
+            e('div',{className:'cd-field'},e('div',{className:'cd-lbl'},'Mobile'),e('input',{type:'tel',className:'cd-inp',placeholder:'04XX XXX XXX',value:phone,onChange:ev=>setDet(id,'phone',ev.target.value)})),
+            e('div',{className:'cd-field'},e('div',{className:'cd-lbl'},'Role'),e('select',{className:'cd-role-sel',value:role,onChange:ev=>setDet(id,'role',ev.target.value)},ROLES.map(r=>e('option',{key:r,value:r},r)))),
+            e('div',{className:'cd-field'},
+              e('div',{className:'cd-lbl'},'Tax Withholding %'),
+              e('input',{type:'number',className:'cd-inp',placeholder:'e.g. 19',value:taxRate,min:0,max:47,step:1,onChange:ev=>setDet(id,'taxRate',ev.target.value)}),
+              taxRate&&e('div',{className:'tax-note'},'Net ≈ '+(100-parseFloat(taxRate||0)).toFixed(0)+'% of gross')
+            )
+          )
+        );
+      })
+    ),
+
+    /* PAY SETTINGS */
+    e('div',{className:'admin-section'},
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Pay Settings'),e('div',{className:'admin-sec-sub'},'Controls how Summary tab filters pay periods')),
       e('div',{style:{padding:'14px'}},
         e('div',{className:'rate-lbl',style:{marginBottom:8}},'Pay Frequency'),
         e('div',{className:'freq-btns'},
           [['weekly','Weekly'],['fortnightly','Fortnightly'],['shed','End of Shed']].map(([v,l])=>
-            e('button',{key:v,className:`freq-btn${(rates.payFrequency||'weekly')===v?' on':''}`,onClick:()=>setJob(prev=>({...prev,rates:{...prev.rates,payFrequency:v}}))},l)
+            e('button',{key:v,className:`freq-btn${(draft.payFrequency||'weekly')===v?' on':''}`,onClick:()=>setDraft(p=>({...p,payFrequency:v}))},l)
           )
         ),
-        (rates.payFrequency||'weekly')!=='shed'&&e('div',null,
-          e('div',{className:'rate-lbl',style:{marginBottom:8,marginTop:14}},'Pay Day — wages processed on this day for the prior '+(rates.payFrequency==='fortnightly'?'14':'7')+' days'),
-          e('select',{className:'pay-day-sel',value:rates.payDayOfWeek!=null?rates.payDayOfWeek:4,onChange:ev=>setJob(prev=>({...prev,rates:{...prev.rates,payDayOfWeek:parseInt(ev.target.value)}}))},
-            DAY_FULL.map((day,i)=>e('option',{key:i,value:i},day))
-          ),
-          e('div',{style:{fontSize:'12px',color:'var(--muted)',marginTop:8}},
-            'Period: '+DAY_FULL[rates.payDayOfWeek!=null?rates.payDayOfWeek:4]+' \u2192 '+DAY_FULL[((rates.payDayOfWeek!=null?rates.payDayOfWeek:4)+(rates.payFrequency==='fortnightly'?13:6))%7]+' ('+( rates.payFrequency==='fortnightly'?'14':'7')+' days)'
+        (draft.payFrequency||'weekly')!=='shed'&&e('div',null,
+          e('div',{className:'rate-lbl',style:{marginBottom:8,marginTop:14}},'Pay Day'),
+          e('select',{className:'pay-day-sel',value:draft.payDayOfWeek??4,onChange:ev=>setDraft(p=>({...p,payDayOfWeek:parseInt(ev.target.value)}))},
+            DAY_FULL_.map((day,i)=>e('option',{key:i,value:i},day))
           )
         ),
-        (rates.payFrequency==='shed')&&e('div',{style:{fontSize:'12px',color:'var(--muted)',marginTop:10,padding:'8px 12px',background:'var(--card2)',borderRadius:8}},
-          '📋 Crew paid in full at job completion. Summary shows all tallies for the entire job as one pay run.'
+        (draft.payFrequency==='shed')&&e('div',{style:{fontSize:'12px',color:'var(--muted)',marginTop:10,padding:'8px 12px',background:'var(--card2)',borderRadius:8}},
+          '📋 Crew paid in full at job completion.'
         )
       )
     ),
+
+    /* FARMER CHARGE-OUT RATES */
     e('div',{className:'admin-section'},
-      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Farmer Charge-out Rates'),e('div',{className:'admin-sec-sub'},'What the contractor charges the farmer — used in Farmer Invoice (separate from crew pay rates)')),
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Farmer Charge-out Rates'),e('div',{className:'admin-sec-sub'},'What the contractor charges the farmer — separate from crew pay rates')),
       e('div',{className:'rate-grid'},
-        e('div',{className:'rate-cell'},e('div',{className:'rate-lbl'},'Shearing $/head'),e('div',{className:'rate-inp-row'},e('span',{className:'rate-prefix'},'$'),e('input',{type:'number',className:'rate-inp',value:rates.farmerShearingRate||'',placeholder:'6.50',step:'0.05',onChange:ev=>setRate('farmerShearingRate',ev.target.value)}))),
-        e('div',{className:'rate-cell'},e('div',{className:'rate-lbl'},'Crutching $/head'),e('div',{className:'rate-inp-row'},e('span',{className:'rate-prefix'},'$'),e('input',{type:'number',className:'rate-inp',value:rates.farmerCrutchingRate||'',placeholder:'2.00',step:'0.05',onChange:ev=>setRate('farmerCrutchingRate',ev.target.value)})))
+        e(RCell,{lbl:'Shearing $/head',k:'farmerShearingRate',prefix:'$'}),
+        e(RCell,{lbl:'Crutching $/head',k:'farmerCrutchingRate',prefix:'$'})
       )
     ),
+
+    /* SAVE BUTTON */
+    e('div',{className:'admin-section'},
+      e('button',{className:'btn-p',onClick:doSave,style:{width:'100%',fontSize:16,padding:'14px'}},saved?'✓ Saved!':'💾 Save Rate Changes')
+    ),
+
+    /* DANGER ZONE */
     e('div',{className:'admin-section'},
       e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title',style:{color:'#ef4444'}},'Danger Zone')),
-      !confirmDelete&&e('button',{
-        onClick:()=>setConfirmDelete(true),
-        style:{width:'100%',padding:'12px',background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',borderRadius:8,color:'#ef4444',fontWeight:700,fontSize:14,cursor:'pointer'}
-      },'🗑️ Delete Farm from List'),
+      !confirmDelete&&e('button',{onClick:()=>setConfirmDelete(true),style:{width:'100%',padding:'12px',background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',borderRadius:8,color:'#ef4444',fontWeight:700,fontSize:14,cursor:'pointer'}},'🗑️ Delete Farm from List'),
       confirmDelete&&e('div',{style:{background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.2)',borderRadius:10,padding:16}},
         e('div',{style:{fontWeight:700,fontSize:14,marginBottom:6,color:'#ef4444'}},'Delete this farm?'),
         e('div',{style:{fontSize:13,color:'var(--muted)',marginBottom:14}},'Removes the farm from your farm list. Existing jobs using it are unaffected.'),
@@ -1290,6 +1379,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
     e('div',{style:{height:16}})
   );
 }
+
 /* ── PROGRESS TAB ── */
 function ProgressTab({job}){
   const p=calcProg(job);
