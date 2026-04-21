@@ -1554,8 +1554,8 @@ function OverviewTab({job,role,onSend,canSend,onEditFarm}){
   );
 }
 /* ── JOB DETAIL ── */
-function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit,onDeleteJob}){
-  const [tab,setTab]=useState('tallies');
+function JobDetailScreen({job,setJob,role,setRole,onBack,onSend,onEdit,onDeleteJob,initialTab}){
+  const [tab,setTab]=useState(initialTab||'tallies');
   const [showEditFarm,setShowEditFarm]=useState(false);
   const farm=gf(job.farmId);
   const handleSaveFarm=f=>{
@@ -1633,7 +1633,7 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
     'Sheep: '+job.totalSheep.toLocaleString(),
     farm?'Address: '+farm.address:'',
     '',
-    '👉 View job details: '+appUrl,
+    '👉 View job details: '+appUrl+'#job='+job.id,
     'Do not reply to this message — contact me directly.',
     '— '+CONTRACTOR_NAME+' via myGang'
   ].filter(l=>l!==null&&l!=='').join('\n');
@@ -1651,7 +1651,7 @@ function buildFarmerSMS(job,farmerName,farmerPhone,farmList,appUrl){
     'Sheep: '+job.totalSheep.toLocaleString(),
     farm?'Address: '+farm.address:'',
     '',
-    '👉 View job details: '+appUrl,
+    '👉 View job details: '+appUrl+'#job='+job.id,
     '',
     'Questions? Call or reply to this message.',
     '— '+CONTRACTOR_NAME+' via myGang'
@@ -2344,6 +2344,7 @@ function App(){
     return 'read_only';
   });
   const [screen,setScreen]=useState('home');
+  const [deepLinkTab,setDeepLinkTab]=useState(null);
   const persistRole=r=>{setRole(r);lsSet(LS_ROLE,r);lsSet(LS_ROLE_TS,Date.now());};
   const [selJobId,setSelJobId]=useState(null);
   const [jobs,setJobs]=useState([]);
@@ -2366,6 +2367,15 @@ function App(){
       setLoadedFromCache(fromCache);
       setLoading(false);isLoaded.current=true;
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
+      /* Deep link: #job=JOB_ID opens that job on Overview tab */
+      const hash=window.location.hash;
+      const m=hash.match(/#job=(.+)/);
+      if(m){
+        const jid=m[1];
+        const found=j.find(x=>x.id===jid);
+        if(found){setSelJobId(jid);setScreen('job');setDeepLinkTab('overview');}
+        window.location.hash='';
+      }
     }).catch(()=>{setLoading(false);isLoaded.current=true;});
   },[]);
 
@@ -2471,7 +2481,7 @@ function App(){
   return e('div',{style:{paddingTop:!isOnline?20:0}},
     e(StatusBar),
     screen==='home'&&e(HomeScreen,{jobs,role,setRole:persistRole,onJob:goJob,onNew:()=>setShowNew(true),onDatabase:()=>setShowDatabase(true),contractorName:CONTRACTOR_NAME}),
-    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole:persistRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl,onEdit:()=>setShowEdit(true),onDeleteJob:async()=>{await dbDeleteJob(selJob.id);setJobs(p=>p.filter(j=>j.id!==selJob.id));goHome();}}),
+    screen==='job'&&selJob&&e(JobDetailScreen,{job:selJob,setJob:setSelJob,role,setRole:persistRole,onBack:goHome,onSend:()=>setShowSMS(true),gfl,gcl,onEdit:()=>setShowEdit(true),onDeleteJob:async()=>{await dbDeleteJob(selJob.id);setJobs(p=>p.filter(j=>j.id!==selJob.id));goHome();},initialTab:deepLinkTab,key:selJobId+(deepLinkTab||'')}),
     showSMS&&selJob&&e(SMSModal,{job:selJob,onClose:()=>{setShowSMS(false);setPreviewId(null);},onPreview:id=>setPreviewId(id),farmList,crewList}),
     previewId&&selJob&&e(JobCardView,{job:selJob,crewId:previewId,onClose:()=>setPreviewId(null),gfl,gcl}),
     showDatabase&&e(DatabaseScreen,{farmList,crewList,addFarm,addCrew,setFarmList,setCrewList,onClose:()=>setShowDatabase(false)}),
