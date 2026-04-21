@@ -540,7 +540,7 @@ function Av({name,size=34}){const c=avc(name);return e('div',{className:'av',sty
 function Bdg({status}){const m={Active:'b-active',Completed:'b-completed','Charged Out':'b-charged',Dispatched:'b-dispatched'};const d={Active:'● ',Dispatched:'◆ '};return e('span',{className:`badge ${m[status]||'b-active'}`},(d[status]||'')+status);}
 /* LOCAL DATE HELPERS — no timezone issues */
 function addDays(d,n){const [y,mo,dy]=d.split('-').map(Number);const dt=new Date(y,mo-1,dy+n);return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;}
-function fmtDate(d){const [y,mo,dy]=d.split('-').map(Number);return new Date(y,mo-1,dy).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'numeric'}).replace(/\//g,'-');}
+function fmtDate(d){const [y,mo,dy]=d.split('-').map(Number);return new Date(y,mo-1,dy).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'numeric'});}
 function fmtDateLong(d){const [y,mo,dy]=d.split('-').map(Number);return new Date(y,mo-1,dy).toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'});}
 function localToday(){const n=new Date();return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;}
 function jobDates(j){const ds=[];for(let i=0;i<j.daysAllocated;i++)ds.push(addDays(j.startDate,i));return ds;}
@@ -682,7 +682,7 @@ function generateSummary(job,period){
   let totalShEarn=0,totalShedEarn=0,totalTravel=0;
   const L=[];
   L.push('PAY SUMMARY \u2014 '+(farm?farm.name.toUpperCase():'JOB'));
-  if(farm)L.push('Address: '+farm.address+'  |  From: '+job.startDate);
+  if(farm)L.push('Address: '+farm.address+'  |  From: '+fmtDate(job.startDate));
   if(period)L.push('Pay Period: '+fmtPeriodLabel(period.start,period.end));
   L.push('Status: '+job.status.toUpperCase());
   L.push('');L.push(dash);L.push('');L.push('SHEARERS');L.push(dash);
@@ -695,7 +695,7 @@ function generateSummary(job,period){
     const travel=trvl(id);const gross=s.shEarn+s.crEarn+travel;
     const taxAmt=taxPct>0?gross*(taxPct/100):0;
     totalShEarn+=s.shEarn+s.crEarn;totalTravel+=travel;
-    L.push('');L.push(sn(c.name)+' \u2014 '+(det.role||c.role));
+    L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));
     if(s.sh>0)L.push('  Sheep shorn: '+s.sh.toLocaleString()+' head @ $'+shR.toFixed(2)+' = $'+s.shEarn.toFixed(2));
     if(s.cr>0)L.push('  Crutched: '+s.cr.toLocaleString()+' head @ $'+crR.toFixed(2)+' = $'+s.crEarn.toFixed(2));
     if(td[id])L.push('  Travel: '+td[id]+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
@@ -723,7 +723,7 @@ function generateSummary(job,period){
     const det=(rates.crewDetails||{})[id]||{};
     const taxPct=parseFloat(det.taxRate||0)||0;
     const taxAmt=taxPct>0?gross*(taxPct/100):0;
-    L.push('');L.push(sn(c.name)+' \u2014 '+(det.role||c.role));L.push(earnLine);
+    L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));L.push(earnLine);
     if(td[id])L.push('  Travel: '+td[id]+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
     L.push('  GROSS TOTAL: $'+gross.toFixed(2));
     if(taxPct>0){L.push('  Tax withheld ('+taxPct+'%): -$'+taxAmt.toFixed(2));L.push('  NET PAY: $'+(gross-taxAmt).toFixed(2));}
@@ -948,7 +948,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const todayStr=localToday();
   const dates=jobDates(job);
   const dayRuns=(job.runs||{})[viewDate]||[];
-  const shearers=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shearers=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const shedStaff=job.crew.filter(id=>{const c=gc(id);return c&&(c.role==='Wool Handler'||c.role==='Wool Classer'||c.role==='Penner');});
   const pressers=job.crew.filter(id=>gc(id)?.role==='Presser');
   const rates=job.rates||{};
@@ -2215,6 +2215,7 @@ function App(){
   };
   const goHome=()=>{setScreen('home');setSelJobId(null);setShowSMS(false);setPreviewId(null);setJobPinPending(null);};
   const doCreate=async job=>{
+    syncLookups(farmList,crewList); /* ensure lookups fresh before entering job */
     setJobs(p=>[job,...p]);
     setShowNew(false);
     setSelJobId(job.id);
