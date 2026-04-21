@@ -614,7 +614,7 @@ function fmtPeriodLabel(start,end){
   return dn[sdt.getDay()]+' '+sd+' '+mo[sm-1]+' \u2013 '+dn[edt.getDay()]+' '+ed+' '+mo[em-1];
 }
 function calcPeriodStats(job,period){
-  const shIds=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const rates=job.rates||{};
   let shorn=0,totalEarn=0;
   const inP=date=>date>=period.start&&date<=period.end;
@@ -637,7 +637,7 @@ function calcPeriodStats(job,period){
 const pad=(str,len)=>String(str).padEnd(len,' ');
 function generateFarmerInvoice(job){
   const farm=gf(job.farmId);const rates=job.rates||{};
-  const shIds=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const dash='\u2500'.repeat(56);
   /* Group mobs by type+desc across entire job */
   const groups={};
@@ -680,7 +680,7 @@ function generateFarmerInvoice(job){
 }
 function generateSummary(job,period){
   const farm=gf(job.farmId);const rates=job.rates||{};
-  const shIds=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const shedIds=job.crew.filter(id=>gc(id)?.role!=='Shearer');
   const dash='\u2500'.repeat(52);
   const inP=date=>!period||(date>=period.start&&date<=period.end);
@@ -1141,7 +1141,7 @@ function SummaryTab({job}){
   const prevStart=period?addDays(period.start,-periodLen):null;
   const nextStart=period?addDays(period.start,periodLen):null;
   const btnLabel=d=>{const [,mo,dy]=d.split('-').map(Number);const dt=new Date(d.split('-')[0],mo-1,dy);const dn=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];return dn[dt.getDay()]+' '+String(dy).padStart(2,'0')+'/'+String(mo).padStart(2,'0');};
-  const shIds=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const totalJobShorn=Object.values(job.runs||{}).flat().flatMap(r=>mobsOf(r)).reduce((s,mob)=>s+shIds.reduce((a,id)=>a+(mob.counts[id]||0),0),0);
   const totalDue=Object.values(job.runs||{}).flat().flatMap(r=>mobsOf(r)).reduce((s,mob)=>{const cnt=shIds.reduce((a,id)=>a+(mob.counts[id]||0),0);const r2=mob.rateOverride!=null?mob.rateOverride:(mob.type==='Shearing'?rates.farmerShearingRate||6.50:rates.farmerCrutchingRate||2.00);return s+cnt*r2;},0);
 
@@ -1225,7 +1225,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
     setSaved(true);setTimeout(()=>setSaved(false),2000);
   };
 
-  const shearers=job.crew.filter(id=>gc(id)?.role==='Shearer');
+  const shearers=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
   const crutchers=job.crew.filter(id=>gc(id)?.role==='Crutcher');
   const loadingCrew=[...shearers,...crutchers]; /* shearers + crutchers get $/head loadings */
   const shedStaff=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
@@ -1834,6 +1834,8 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       e(FF,{label:'Total Sheep'},e('input',{type:'number',className:'fi',placeholder:'e.g. 3000',min:1,ref:rSheep,inputMode:'numeric'})),
       e(FF,{label:'EVOs'},e('div',{className:'tog-row'},...['BYO','Supplied at shed'].map(o=>e('button',{key:o,className:`tog-opt${evos===o?' on':''}`,onClick:()=>setEvos(o)},o)))),
       e(FF,{label:'Transport'},e('div',{className:'tog-row'},...[['Yes',true],['No',false]].map(([l,v])=>e('button',{key:l,className:`tog-opt${transport===v?' on':''}`,onClick:()=>setTransport(v)},l)))),
+      e(FF,{label:'Crutching Trailer'},e('div',{className:'tog-row'},...[['Provided',true],['Not Provided',false]].map(([l,v])=>e('button',{key:l,className:`tog-opt${crutchingTrailer===v?' on':''}`,onClick:()=>setCrutchingTrailer(v)},l)))),
+      e(FF,{label:'Meals'},e('div',{className:'tog-row'},...['Not Supplied','Provided'].map(o=>e('button',{key:o,className:`tog-opt${meals===o?' on':''}`,onClick:()=>setMeals(o)},o)))),
       e(FF,{label:'Accommodation'},e('input',{type:'text',className:'fi',placeholder:'e.g. Shearers quarters on property',ref:rAccomm})),
       e(FF,{label:'Notes'},e('textarea',{className:'fi',rows:3,placeholder:'e.g. Merino full CRT and wig.',ref:rNotes})),
       e(FF,{label:'Job PIN (optional)'},
