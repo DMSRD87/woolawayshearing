@@ -1080,22 +1080,48 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
       )),
       pressers.length>0&&e('div',null,
         e('div',{className:'role-grp-lbl'},'PRESSER'),
-        pressers.map(id=>{const c=gc(id);if(!c)return null;const runs=(job.shedTallies[id]||{})[viewDate]||0;const balesDay=(job.baleTallies[id]||{})[viewDate]||0;const bf=job.baleBF[id]||0;const toDate=bf+baleTot(id);const allRuns=Object.values(job.shedTallies[id]||{}).reduce((a,b)=>a+b,0);
+        pressers.map(id=>{
+          const c=gc(id);if(!c)return null;
+          const runs=(job.shedTallies[id]||{})[viewDate]||0;
+          const balesDay=(job.baleTallies[id]||{})[viewDate]||0;
+          const allRuns=Object.values(job.shedTallies[id]||{}).reduce((a,b)=>a+b,0);
+          const allBales=Object.values(job.baleTallies[id]||{}).reduce((a,b)=>a+b,0);
+          const bfRuns=Object.entries(job.shedTallies[id]||{}).filter(([d])=>d<viewDate).reduce((a,[,b])=>a+b,0);
+          const bfBales=Object.entries(job.baleTallies[id]||{}).filter(([d])=>d<viewDate).reduce((a,[,b])=>a+b,0);
           const threshold=rates.baleThreshold||13;
           const payMode=balesDay>=threshold?'bale':'run';
           return e('div',{key:id,className:'staff-row',style:{flexWrap:'wrap',rowGap:'8px'}},
             e(Av,{name:c.name,size:36}),
-            e('div',{className:'staff-info'},e('div',{className:'staff-name'},c.name),isAdmin&&e('div',{className:'staff-rate-lbl'},'$'+(rates.presserPerRun||85)+'/run · $'+(rates.presserPerBale||14.20)+'/bale ≥'+threshold,balesDay>=threshold&&e('span',{style:{color:'var(--green)',marginLeft:4}},payMode==='bale'?'▲ per bale':''))),
+            e('div',{className:'staff-info'},
+              e('div',{className:'staff-name'},c.name),
+              isAdmin&&e('div',{className:'staff-rate-lbl'},
+                '$'+(rates.presserPerRun||85)+'/run · $'+(rates.presserPerBale||14.20)+'/bale ≥'+threshold,
+                e('span',{style:{marginLeft:6,fontWeight:700,color:payMode==='bale'?'var(--amber)':'var(--muted)'}},
+                  payMode==='bale'?'▲ BALE MODE':'● Run mode')
+              )
+            ),
             e('div',{className:'staff-stats',style:{flexWrap:'wrap',rowGap:'6px'}},
-              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Runs'),canEdit?e('div',{className:'rs'},e('button',{className:'rs-btn',disabled:runs<=0,onClick:()=>setShed(id,runs-1)},'−'),e('div',{className:'rs-val'},runs),e('button',{className:'rs-btn',onClick:()=>setShed(id,runs+1)},'+'))
+              /* RUNS — stepper + totals */
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Runs'),
+                canEdit?e('div',{className:'rs'},
+                  e('button',{className:'rs-btn',disabled:runs<=0,onClick:()=>setShed(id,runs-1)},'−'),
+                  e('div',{className:'rs-val'},runs),
+                  e('button',{className:'rs-btn',onClick:()=>setShed(id,runs+1)},'+'))
                 :e('div',{className:'s-val'},runs)),
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl',style:{fontSize:10}},'B/F'),e('div',{className:'s-val'},bfRuns)),
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl',style:{fontSize:10,whiteSpace:'nowrap'}},'Run Tot'),
+                e('div',{className:`s-val${payMode==='run'?' hi':''}`},allRuns)),
               e('div',{className:'s-div'}),
-              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Bales'),canEdit?e('div',{className:'rs'},e('button',{className:'rs-btn',disabled:balesDay<=0,onClick:()=>setBale(id,balesDay-1)},'−'),e('div',{className:`rs-val${balesDay>=threshold?' s-val hi':''}`},balesDay),e('button',{className:'rs-btn',onClick:()=>setBale(id,balesDay+1)},'+'))
-                :e('div',{className:`s-val${balesDay>=threshold?' hi':''}`},balesDay)),
-              e('div',{className:'s-div'}),
-              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'B/F'),e('div',{className:'s-val'},bf)),
-              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Today'),e('div',{className:'s-val'},balesDay)),
-              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'To Date'),e('div',{className:'s-val hi'},toDate))
+              /* BALES — stepper + totals */
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Bales'),
+                canEdit?e('div',{className:'rs'},
+                  e('button',{className:'rs-btn',disabled:balesDay<=0,onClick:()=>setBale(id,balesDay-1)},'−'),
+                  e('div',{className:`rs-val${payMode==='bale'?' hi':''}`},balesDay),
+                  e('button',{className:'rs-btn',onClick:()=>setBale(id,balesDay+1)},'+'))
+                :e('div',{className:`s-val${payMode==='bale'?' hi':''}`},balesDay)),
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl',style:{fontSize:10}},'B/F'),e('div',{className:'s-val'},bfBales)),
+              e('div',{className:'s-grp'},e('div',{className:'s-lbl',style:{fontSize:10,whiteSpace:'nowrap'}},'Bale Tot'),
+                e('div',{className:`s-val${payMode==='bale'?' hi':''}`},allBales))
             )
           );
         })
