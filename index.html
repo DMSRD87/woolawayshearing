@@ -530,7 +530,7 @@ function syncLookups(farms,crew){FARMS.length=0;FARMS.push(...(farms||[]));CREW.
 const mkRun=(id,type,desc,counts,ro)=>({id,mobs:[{id:id+'_m1',type,desc,counts,...(ro!=null?{rateOverride:ro}:{})}]});
 const mkRates=(ov={})=>{
   const last=lsGet(LS_LAST_RATES)||{};
-  return {shearingPerHead:last.shearingPerHead??4.80,crutchingPerHead:last.crutchingPerHead??1.55,woolHandlerPerRun:last.woolHandlerPerRun??80,classerPerRun:last.classerPerRun??110,pennerPerRun:last.pennerPerRun??85,presserPerRun:last.presserPerRun??85,presserPerBale:last.presserPerBale??14.20,baleThreshold:last.baleThreshold??13,crewOverrides:{},shearerLoadings:{},loadingType:{},travelDays:{},travelRate:{},payDayOfWeek:last.payDayOfWeek??4,payFrequency:last.payFrequency??'weekly',farmerShearingRate:last.farmerShearingRate??6.50,farmerCrutchingRate:last.farmerCrutchingRate??2.00,crewDetails:{},...ov};
+  return {shearingPerHead:last.shearingPerHead??4.80,crutchingPerHead:last.crutchingPerHead??1.55,woolHandlerPerRun:last.woolHandlerPerRun??80,classerPerRun:last.classerPerRun??110,pennerPerRun:last.pennerPerRun??85,presserPerRun:last.presserPerRun??85,presserPerBale:last.presserPerBale??14.20,baleThreshold:last.baleThreshold??13,crewOverrides:{},shearerLoadings:{},loadingType:{},travelRate:{},payDayOfWeek:last.payDayOfWeek??4,payFrequency:last.payFrequency??'weekly',farmerShearingRate:last.farmerShearingRate??6.50,farmerCrutchingRate:last.farmerCrutchingRate??2.00,crewDetails:{},...ov};
 };
 const INIT_JOBS=[];
 const gf=id=>FARMS.find(f=>f.id===id);
@@ -626,11 +626,11 @@ function calcPeriodStats(job,period){
     const rpr=ov||defR||80;
     if(c.role==='Presser'){Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;const bales=(job.baleTallies[id]||{})[date]||0;totalEarn+=bales>(rates.baleThreshold||13)?bales*(rates.presserPerBale||14.20):runs*rpr;});}
     else{Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;totalEarn+=runs*rpr;});}
-    const td=rates.travelDays||{};const tr=rates.travelRate||{};
-    totalEarn+=(td[id]||0)*(tr[id]||0);
+    const tr2=rates.travelRate||{};
+    totalEarn+=Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0)*(tr2[id]||0);
   });
   // Shearer travel
-  shIds.forEach(id=>{const td=rates.travelDays||{};const tr=rates.travelRate||{};totalEarn+=(td[id]||0)*(tr[id]||0);});
+  shIds.forEach(id=>{const tr2=rates.travelRate||{};totalEarn+=Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0)*(tr2[id]||0);});
   return{shorn,totalEarn};
 }
 /* PAY SUMMARY */
@@ -686,8 +686,9 @@ function generateSummary(job,period){
   const inP=date=>!period||(date>=period.start&&date<=period.end);
   const shornBy={};shIds.forEach(id=>{shornBy[id]={sh:0,shEarn:0,cr:0,crEarn:0};});
   Object.entries(job.runs||{}).forEach(([date,dayRuns])=>{if(!inP(date))return;dayRuns.forEach(run=>{mobsOf(run).forEach(mob=>{const br=mob.rateOverride!=null?mob.rateOverride:(mob.type==='Shearing'?rates.shearingPerHead:rates.crutchingPerHead)||0;shIds.forEach(id=>{const cnt=mob.counts[id]||0;if(!cnt)return;const load=(rates.shearerLoadings||{})[id]||0;if(mob.type==='Shearing'){shornBy[id].sh+=cnt;shornBy[id].shEarn+=cnt*(br+load);}else{shornBy[id].cr+=cnt;shornBy[id].crEarn+=cnt*(br+load);}});});});});
-  const td=rates.travelDays||{};const tr=rates.travelRate||{};
-  const trvl=id=>(td[id]||0)*(tr[id]||0);
+  const tr=rates.travelRate||{};
+  const travelDayCount=id=>Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0);
+  const trvl=id=>travelDayCount(id)*(tr[id]||0);
   let totalShEarn=0,totalShedEarn=0,totalTravel=0;
   const L=[];
   L.push('PAY SUMMARY \u2014 '+(farm?farm.name.toUpperCase():'JOB'));
@@ -714,7 +715,7 @@ function generateSummary(job,period){
     L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));
     if(s.sh>0)L.push('  Sheep shorn: '+s.sh.toLocaleString()+' head @ $'+shR.toFixed(2)+' = $'+s.shEarn.toFixed(2));
     if(s.cr>0)L.push('  Crutched: '+s.cr.toLocaleString()+' head @ $'+crR.toFixed(2)+' = $'+s.crEarn.toFixed(2));
-    if(td[id])L.push('  Travel: '+td[id]+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
+    const tDays=travelDayCount(id);if(tDays)L.push('  Travel: '+tDays+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
     L.push('  GROSS TOTAL: $'+gross.toFixed(2));
     if(taxPct>0){L.push('  Tax withheld ('+taxPct+'%): -$'+taxAmt.toFixed(2));L.push('  NET PAY: $'+(gross-taxAmt).toFixed(2));}
   });
@@ -740,7 +741,7 @@ function generateSummary(job,period){
     const taxPct=parseFloat(det.taxRate||0)||0;
     const taxAmt=taxPct>0?gross*(taxPct/100):0;
     L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));L.push(earnLine);
-    if(td[id])L.push('  Travel: '+td[id]+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
+    const tDays=travelDayCount(id);if(tDays)L.push('  Travel: '+tDays+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
     L.push('  GROSS TOTAL: $'+gross.toFixed(2));
     if(taxPct>0){L.push('  Tax withheld ('+taxPct+'%): -$'+taxAmt.toFixed(2));L.push('  NET PAY: $'+(gross-taxAmt).toFixed(2));}
   });
@@ -988,6 +989,9 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const setBale=(cid,v)=>setJob(prev=>({...prev,baleTallies:{...prev.baleTallies,[cid]:{...(prev.baleTallies[cid]||{}),[viewDate]:Math.max(0,v)}}}));
   const baleTot=id=>Object.values(job.baleTallies[id]||{}).reduce((a,b)=>a+b,0);
   const setNote=v=>setJob(prev=>({...prev,dayNotes:{...prev.dayNotes,[viewDate]:v}}));
+  const setTravel=(cid,val)=>setJob(prev=>({...prev,travelTallies:{...prev.travelTallies,[cid]:{...(prev.travelTallies[cid]||{}),[viewDate]:val}}}));
+  const travelDayCount=id=>Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0);
+  const travelBF=id=>Object.entries((job.travelTallies||{})[id]||{}).filter(([d])=>d<viewDate).reduce((a,[,b])=>a+(b?1:0),0);
   const hasCrutch=Object.values(job.runs||{}).flat().some(run=>mobsOf(run).some(m=>m.type==='Crutching'));
   const stats=shearerStats(job,viewDate,shearers);
   const mts=mobTotals(job,viewDate,shearers);
@@ -1127,6 +1131,39 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
         })
       )
     ),
+    /* TRAVEL SECTION */
+    e('div',{className:'shed-section'},
+      e('div',{className:'shed-sec-hdr'},'TRAVEL'),
+      job.crew.map(id=>{
+        const c=gc(id);if(!c)return null;
+        const todayTravel=(job.travelTallies||{})[id]?.[viewDate]?1:0;
+        const bf=travelBF(id);
+        const total=travelDayCount(id);
+        const rate=(job.rates?.travelRate||{})[id]||0;
+        const canEditTravel=canEdit||isAdmin;
+        return e('div',{key:id,className:'staff-row'},
+          e(Av,{name:c.name,size:32}),
+          e('div',{className:'staff-info'},
+            e('div',{className:'staff-name'},c.name),
+            e('div',{className:'staff-rate-lbl'},c.role+(isAdmin&&rate?' · $'+rate+'/day':''))
+          ),
+          e('div',{className:'staff-stats'},
+            e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Today'),
+              canEditTravel
+                ?e('button',{
+                    onClick:()=>setTravel(id,todayTravel?0:1),
+                    style:{padding:'4px 12px',borderRadius:8,fontWeight:700,fontSize:13,cursor:'pointer',border:'none',
+                      background:todayTravel?'var(--amber)':'var(--card2)',color:todayTravel?'#000':'var(--muted)'}
+                  },todayTravel?'✓ Yes':'No')
+                :e('div',{className:'s-val'},todayTravel?'✓':'—')
+            ),
+            e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'B/F'),e('div',{className:'s-val'},bf)),
+            e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Total'),e('div',{className:`s-val${total?' hi':''}`},total)),
+            isAdmin&&rate&&total>0&&e('div',{className:'s-grp'},e('div',{className:'s-lbl',style:{fontSize:10}},'Amount'),e('div',{className:'s-val',style:{color:'var(--amber)',fontWeight:700}},'$'+(total*rate).toFixed(2)))
+          )
+        );
+      })
+    ),
     e('div',{className:'notes-wrap'},e('div',{className:'notes-lbl'},'Notes — '+fmtDateLong(viewDate)),e('textarea',{className:'notes-ta',rows:3,placeholder:'Notes for the day...',value:(job.dayNotes||{})[viewDate]||'',disabled:!canEdit,onChange:ev=>setNote(ev.target.value)})),
     e('div',{style:{height:20}})
   );
@@ -1242,7 +1279,6 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
   const set=(k,v)=>setDraft(p=>({...p,[k]:v}));
   const setOv=(id,v)=>setDraft(p=>({...p,crewOverrides:{...(p.crewOverrides||{}),[id]:v===''?undefined:parseFloat(v)||0}}));
   const setLoad=(id,v)=>setDraft(p=>({...p,shearerLoadings:{...(p.shearerLoadings||{}),[id]:v===''?0:parseFloat(v)||0}}));
-  const setTD=(id,v)=>setDraft(p=>({...p,travelDays:{...(p.travelDays||{}),[id]:parseInt(v)||0}}));
   const setTR=(id,v)=>setDraft(p=>({...p,travelRate:{...(p.travelRate||{}),[id]:parseFloat(v)||0}}));
   const setDet=(id,k,v)=>setDraft(p=>({...p,crewDetails:{...(p.crewDetails||{}),[id]:{...(p.crewDetails||{})[id],[k]:v}}}));
 
@@ -1339,25 +1375,19 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
       })
     ),
 
-    /* TRAVEL */
+    /* TRAVEL RATES — days tracked on Tally tab, rates set here */
     e('div',{className:'admin-section'},
-      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Travel'),e('div',{className:'admin-sec-sub'},'Days × daily rate per person')),
+      e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Travel Rates'),e('div',{className:'admin-sec-sub'},'Daily rate per person — travel days marked on Tally tab by Lead')),
       job.crew.map(id=>{
         const c=gc(id);if(!c)return null;
-        const days=(draft.travelDays||{})[id]??'';
         const rate=(draft.travelRate||{})[id]??'';
+        const days=Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0);
         return e('div',{key:id,className:'loading-row'},
-          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),
-          e('div',{className:'lr-r',style:{gap:8}},
-            e('span',{style:{display:'flex',alignItems:'center',gap:3}},
-              e('input',{type:'number',className:'tr-inp',value:days,placeholder:'0',min:0,onChange:ev=>setTD(id,ev.target.value)}),
-              e('span',{className:'tr-unit'},'days')
-            ),
-            e('span',{style:{display:'flex',alignItems:'center',gap:3}},
-              e('span',{className:'lr-prefix'},'$'),
-              e('input',{type:'number',className:'tr-inp',style:{width:52},value:rate,placeholder:'40',step:'5',onChange:ev=>setTR(id,ev.target.value)}),
-              e('span',{className:'tr-unit'},'/day')
-            )
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+(days?' · '+days+' day'+(days!==1?'s':''):'')))),
+          e('div',{className:'lr-r',style:{gap:6}},
+            e('span',{className:'lr-prefix'},'$'),
+            e('input',{type:'number',className:'tr-inp',style:{width:58},value:rate,placeholder:'40',step:'5',onChange:ev=>setTR(id,ev.target.value)}),
+            e('span',{className:'tr-unit'},'/day')
           )
         );
       })
@@ -1820,7 +1850,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       status:'Active',crew:selCrew,
       jobPin:rJobPin.current?.value?.trim()||null,
       jobName:rJobName.current?.value?.trim()||'',
-      rates:mkRates(),runs:{},shedTallies:{},baleTallies:{},baleBF:{},dayNotes:{}
+      rates:mkRates(),runs:{},shedTallies:{},baleTallies:{},baleBF:{},travelTallies:{},dayNotes:{}
     });
   };
 
