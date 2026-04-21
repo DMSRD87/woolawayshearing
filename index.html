@@ -989,7 +989,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const setBale=(cid,v)=>setJob(prev=>({...prev,baleTallies:{...prev.baleTallies,[cid]:{...(prev.baleTallies[cid]||{}),[viewDate]:Math.max(0,v)}}}));
   const baleTot=id=>Object.values(job.baleTallies[id]||{}).reduce((a,b)=>a+b,0);
   const setNote=v=>setJob(prev=>({...prev,dayNotes:{...prev.dayNotes,[viewDate]:v}}));
-  const setTravel=(cid,val)=>setJob(prev=>({...prev,travelTallies:{...prev.travelTallies,[cid]:{...(prev.travelTallies[cid]||{}),[viewDate]:val}}}));
+  const setTravel=(cid,val)=>setJob(prev=>({...prev,travelTallies:{...(prev.travelTallies||{}),[cid]:{...((prev.travelTallies||{})[cid]||{}),[viewDate]:val}}}));
   const travelDayCount=id=>Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0);
   const travelBF=id=>Object.entries((job.travelTallies||{})[id]||{}).filter(([d])=>d<viewDate).reduce((a,[,b])=>a+(b?1:0),0);
   const hasCrutch=Object.values(job.runs||{}).flat().some(run=>mobsOf(run).some(m=>m.type==='Crutching'));
