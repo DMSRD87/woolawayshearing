@@ -420,6 +420,7 @@ const LS_FARMS='mg_farms_'+CONTRACTOR_SLUG;
 const LS_CREW='mg_crew_'+CONTRACTOR_SLUG;
 const LS_QUEUE='mg_queue_'+CONTRACTOR_SLUG;
 const LS_ROLE='mg_role_'+CONTRACTOR_SLUG;
+const LS_LAST_RATES='mg_last_rates_'+CONTRACTOR_SLUG;
 const LS_ROLE_TS='mg_role_ts_'+CONTRACTOR_SLUG;
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
 
@@ -527,7 +528,10 @@ let FARMS=[];
 let CREW=[];
 function syncLookups(farms,crew){FARMS.length=0;FARMS.push(...(farms||[]));CREW.length=0;CREW.push(...(crew||[]));}
 const mkRun=(id,type,desc,counts,ro)=>({id,mobs:[{id:id+'_m1',type,desc,counts,...(ro!=null?{rateOverride:ro}:{})}]});
-const mkRates=(ov={})=>({shearingPerHead:4.80,crutchingPerHead:1.55,woolHandlerPerRun:80,classerPerRun:110,pennerPerRun:85,presserPerRun:85,presserPerBale:14.20,baleThreshold:13,crewOverrides:{},shearerLoadings:{},travelDays:{},travelRate:{},payDayOfWeek:4,payFrequency:'weekly',farmerShearingRate:6.50,farmerCrutchingRate:2.00,crewDetails:{},...ov});
+const mkRates=(ov={})=>{
+  const last=lsGet(LS_LAST_RATES)||{};
+  return {shearingPerHead:last.shearingPerHead??4.80,crutchingPerHead:last.crutchingPerHead??1.55,woolHandlerPerRun:last.woolHandlerPerRun??80,classerPerRun:last.classerPerRun??110,pennerPerRun:last.pennerPerRun??85,presserPerRun:last.presserPerRun??85,presserPerBale:last.presserPerBale??14.20,baleThreshold:last.baleThreshold??13,crewOverrides:{},shearerLoadings:{},loadingType:{},travelDays:{},travelRate:{},payDayOfWeek:last.payDayOfWeek??4,payFrequency:last.payFrequency??'weekly',farmerShearingRate:last.farmerShearingRate??6.50,farmerCrutchingRate:last.farmerCrutchingRate??2.00,crewDetails:{},...ov};
+};
 const INIT_JOBS=[];
 const gf=id=>FARMS.find(f=>f.id===id);
 const gc=id=>CREW.find(c=>c.id===id);
@@ -695,9 +699,16 @@ function generateSummary(job,period){
     const c=gc(id);if(!c)return;const s=shornBy[id];
     const det=(rates.crewDetails||{})[id]||{};
     const taxPct=parseFloat(det.taxRate||0)||0;
+    const baseLoad=(rates.shearerLoadings||{})[id]||0;
+    const loadType=(rates.loadingType||{})[id]||'individual';
+    /* Team loading: applied to full team count, not individual */
+    const teamTotal=loadType==='team'?shIds.reduce((s,sid)=>{
+      let t=0;Object.values(job.runs||{}).forEach(rs=>rs.forEach(run=>mobsOf(run).forEach(mob=>{t+=mob.counts[sid]||0;})));return s+t;
+    },0):0;
+    const teamLoadEarn=loadType==='team'&&baseLoad>0?baseLoad*teamTotal:0;
     const shR=(rates.shearingPerHead||4.80)+((rates.shearerLoadings||{})[id]||0);
     const crR=rates.crutchingPerHead||1.55;
-    const travel=trvl(id);const gross=s.shEarn+s.crEarn+travel;
+    const travel=trvl(id);const gross=s.shEarn+s.crEarn+travel+(loadType==='team'?teamLoadEarn:0);
     const taxAmt=taxPct>0?gross*(taxPct/100):0;
     totalShEarn+=s.shEarn+s.crEarn;totalTravel+=travel;
     L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));
@@ -1286,9 +1297,18 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob}){
       loadingCrew.map(id=>{
         const c=gc(id);if(!c)return null;
         const cur=(draft.shearerLoadings||{})[id]??'';
-        return e('div',{key:id,className:'loading-row'},
+        const ltype=(draft.loadingType||{})[id]||'individual';
+        return e('div',{key:id,className:'loading-row',style:{flexWrap:'wrap',gap:8}},
           e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),
-          e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'+$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:'0',step:'0.05',onChange:ev=>setLoad(id,ev.target.value)}),e('span',{className:'lr-unit'},'/head'))
+          e('div',{className:'lr-r',style:{gap:6}},
+            e('span',{className:'lr-prefix'},'+$'),
+            e('input',{type:'number',className:'lr-inp',value:cur,placeholder:'0',step:'0.05',onChange:ev=>setLoad(id,ev.target.value)}),
+            e('span',{className:'lr-unit'},'/head'),
+            e('select',{style:{fontSize:11,padding:'3px 6px',borderRadius:6,border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',marginLeft:4},value:ltype,onChange:ev=>setDraft(p=>({...p,loadingType:{...(p.loadingType||{}),[id]:ev.target.value}}))},
+              e('option',{value:'individual'},'Individual total'),
+              e('option',{value:'team'},'Team total')
+            )
+          )
         );
       })
     ),
@@ -2211,6 +2231,11 @@ function App(){
   const setSelJob=fn=>setJobs(prev=>prev.map(j=>j.id===selJobId?fn(j):j));
   const [jobPinPending,setJobPinPending]=useState(null); /* job id awaiting PIN */
   const goJob=id=>{
+    /* Save current job immediately before switching */
+    if(selJobId&&selJobId!==id){
+      const current=jobs.find(j=>j.id===selJobId);
+      if(current)dbSaveJob(current).catch(()=>{});
+    }
     const job=jobs.find(j=>j.id===id);
     if(job?.jobPin&&role!=='admin'){
       setJobPinPending(id);
@@ -2218,9 +2243,14 @@ function App(){
       setSelJobId(id);setScreen('job');
     }
   };
-  const goHome=()=>{setScreen('home');setSelJobId(null);setShowSMS(false);setPreviewId(null);setJobPinPending(null);};
+  const goHome=()=>{
+    /* Save current job immediately before going home */
+    if(selJobId){const current=jobs.find(j=>j.id===selJobId);if(current)dbSaveJob(current).catch(()=>{});}
+    setScreen('home');setSelJobId(null);setShowSMS(false);setPreviewId(null);setJobPinPending(null);
+  };
   const doCreate=async job=>{
-    syncLookups(farmList,crewList); /* ensure lookups fresh before entering job */
+    syncLookups(farmList,crewList);
+    lsSet(LS_LAST_RATES,job.rates); /* save rates for next job */
     setJobs(p=>[job,...p]);
     setShowNew(false);
     setSelJobId(job.id);
