@@ -620,7 +620,7 @@ function calcPeriodStats(job,period){
   const inP=date=>date>=period.start&&date<=period.end;
   Object.entries(job.runs||{}).forEach(([date,rs])=>{if(!inP(date))return;rs.forEach(run=>{mobsOf(run).forEach(mob=>{const br=mob.rateOverride!=null?mob.rateOverride:(mob.type==='Shearing'?rates.shearingPerHead:rates.crutchingPerHead)||0;shIds.forEach(id=>{const cnt=mob.counts[id]||0;if(!cnt)return;shorn+=cnt;const load=(rates.shearerLoadings||{})[id]||0;totalEarn+=cnt*(br+load);});});});});
   // Shed staff
-  job.crew.filter(id=>gc(id)?.role!=='Shearer').forEach(id=>{
+  job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher').forEach(id=>{
     const ov=(rates.crewOverrides||{})[id];const c=gc(id);if(!c)return;
     const defR=c.role==='Wool Classer'?rates.classerPerRun:c.role==='Penner'?rates.pennerPerRun:c.role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
     const rpr=ov||defR||80;
@@ -681,7 +681,7 @@ function generateFarmerInvoice(job){
 function generateSummary(job,period){
   const farm=gf(job.farmId);const rates=job.rates||{};
   const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
-  const shedIds=job.crew.filter(id=>gc(id)?.role!=='Shearer');
+  const shedIds=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
   const dash='\u2500'.repeat(52);
   const inP=date=>!period||(date>=period.start&&date<=period.end);
   const shornBy={};shIds.forEach(id=>{shornBy[id]={sh:0,shEarn:0,cr:0,crEarn:0};});
