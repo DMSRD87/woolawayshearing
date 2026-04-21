@@ -2005,13 +2005,67 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
 
 /* ── HOME ── */
 function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,contractorName}){
-  const active=jobs.filter(j=>j.status==='Active'),done=jobs.filter(j=>j.status==='Completed'||j.status==='Charged Out'),disp=jobs.filter(j=>j.status==='Dispatched');
-  const Sec=({title,items})=>items.length===0?null:e('div',null,e('div',{className:'slbl'},title),items.map(j=>e(JLC,{key:j.id,job:j,onClick:()=>onJob(j.id)})));
+  const [search,setSearch]=useState('');
+  const [sort,setSort]=useState('date'); /* date | name | size | progress */
+  const [showArchive,setShowArchive]=useState(false);
+  const [archiveMonth,setArchiveMonth]=useState(null); /* null = show all archive months */
+
+  const jobName=j=>{const f=gf(j.farmId);return j.jobName||(f?f.name:'Unknown');};
+  const jobProg=j=>calcProg(j).pct;
+
+  const sortFn=(a,b)=>{
+    if(sort==='name')return jobName(a).localeCompare(jobName(b));
+    if(sort==='size')return b.totalSheep-a.totalSheep;
+    if(sort==='progress')return jobProg(b)-jobProg(a);
+    return new Date(b.startDate)-new Date(a.startDate); /* date default */
+  };
+
+  const q=search.toLowerCase().trim();
+  const matches=j=>!q||jobName(j).toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
+
+  const active=jobs.filter(j=>j.status==='Active'&&matches(j)).sort(sortFn);
+  const completed=jobs.filter(j=>j.status==='Completed'&&matches(j)).sort(sortFn);
+  const charged=jobs.filter(j=>j.status==='Charged Out'&&matches(j)).sort(sortFn);
   const isEmpty=jobs.length===0;
+
+  /* Archive: group charged-out jobs by month */
+  const archiveByMonth=charged.reduce((acc,j)=>{
+    const d=new Date(j.startDate);
+    const key=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+    const label=d.toLocaleDateString('en-AU',{month:'long',year:'numeric'});
+    if(!acc[key])acc[key]={label,jobs:[]};
+    acc[key].jobs.push(j);
+    return acc;
+  },{});
+  const archiveMonths=Object.entries(archiveByMonth).sort((a,b)=>b[0].localeCompare(a[0]));
+
+  const SortBtn=({v,lbl})=>e('button',{onClick:()=>setSort(v),style:{padding:'5px 10px',borderRadius:6,border:'1px solid var(--border)',background:sort===v?'var(--amber)':'var(--card)',color:sort===v?'#000':'var(--muted)',fontWeight:700,fontSize:11,cursor:'pointer',whiteSpace:'nowrap'}},lbl);
+  const Sec=({title,items,badge})=>items.length===0?null:e('div',null,
+    e('div',{className:'slbl',style:{display:'flex',alignItems:'center',gap:8}},
+      title,
+      badge&&e('span',{style:{background:'var(--amber)',color:'#000',borderRadius:10,padding:'1px 7px',fontSize:11,fontWeight:700}},badge)
+    ),
+    items.map(j=>e(JLC,{key:j.id,job:j,onClick:()=>onJob(j.id)}))
+  );
+
   return e('div',null,
     e(TopBar,{role,setRole}),
     e('div',{className:'screen'},
       e(WeekBanner,{jobs,contractorName}),
+
+      /* Search + Sort bar */
+      !isEmpty&&e('div',{style:{padding:'0 16px 8px'}},
+        e('input',{type:'text',placeholder:'🔍 Search jobs...',value:search,onChange:ev=>setSearch(ev.target.value),
+          style:{width:'100%',padding:'9px 12px',border:'1.5px solid var(--border)',borderRadius:8,fontSize:15,marginBottom:8,background:'var(--card)',color:'var(--text)',outline:'none'}}),
+        e('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+          e('span',{style:{fontSize:11,color:'var(--muted)',fontWeight:600,alignSelf:'center'}},'Sort:'),
+          e(SortBtn,{v:'date',lbl:'📅 Date'}),
+          e(SortBtn,{v:'name',lbl:'🔤 Name'}),
+          e(SortBtn,{v:'size',lbl:'🐑 Size'}),
+          e(SortBtn,{v:'progress',lbl:'📊 Progress'})
+        )
+      ),
+
       isEmpty&&e('div',{style:{margin:'32px 16px 0',padding:'32px 24px',background:'var(--card)',border:'2px dashed var(--border)',borderRadius:'var(--r)',textAlign:'center'}},
         e('div',{style:{fontSize:48,marginBottom:12}},'🐑'),
         e('div',{style:{fontFamily:'var(--h)',fontSize:24,fontWeight:800,color:'var(--text)',marginBottom:8}},'Welcome to myGang'),
@@ -2022,14 +2076,49 @@ function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,contractorName}){
           )
         )
       ),
-      e(Sec,{title:'Active',items:active}),
-      e(Sec,{title:'Dispatched',items:disp}),
-      e(Sec,{title:'Completed',items:done})
+
+      e(Sec,{title:'Active',items:active,badge:active.length||null}),
+      e(Sec,{title:'Completed',items:completed,badge:completed.length||null}),
+
+      /* Archive section */
+      charged.length>0&&e('div',null,
+        e('div',{style:{padding:'8px 16px'}},
+          e('button',{onClick:()=>setShowArchive(p=>!p),style:{display:'flex',alignItems:'center',gap:8,background:'none',border:'none',cursor:'pointer',padding:0}},
+            e('div',{className:'slbl',style:{margin:0}},'📦 Archive'),
+            e('span',{style:{background:'var(--muted)',color:'#fff',borderRadius:10,padding:'1px 7px',fontSize:11,fontWeight:700}},charged.length),
+            e('span',{style:{fontSize:12,color:'var(--muted)',marginLeft:4}},'Charged Out jobs — tap to '+(showArchive?'hide':'show'))
+          )
+        ),
+        showArchive&&e('div',null,
+          /* Month picker if no month selected */
+          !archiveMonth&&archiveMonths.map(([key,{label,jobs:mj}])=>
+            e('div',{key,style:{margin:'0 16px 8px',padding:'12px 14px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:10,display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'},onClick:()=>setArchiveMonth(key)},
+              e('div',null,
+                e('div',{style:{fontWeight:700,fontSize:15}},label),
+                e('div',{style:{fontSize:12,color:'var(--muted)',marginTop:2}},mj.length+' job'+(mj.length!==1?'s':''))
+              ),
+              e('span',{style:{color:'var(--muted)',fontSize:18}},'›')
+            )
+          ),
+          /* Jobs in selected month */
+          archiveMonth&&e('div',null,
+            e('div',{style:{padding:'8px 16px'},
+              },e('button',{onClick:()=>setArchiveMonth(null),style:{background:'none',border:'none',color:'var(--amber)',fontWeight:700,fontSize:13,cursor:'pointer'}},'← All months')),
+            (archiveByMonth[archiveMonth]?.jobs||[]).map(j=>e(JLC,{key:j.id,job:j,onClick:()=>onJob(j.id)}))
+          )
+        )
+      ),
+
+      /* No results */
+      q&&active.length===0&&completed.length===0&&charged.length===0&&e('div',{style:{padding:'40px 16px',textAlign:'center',color:'var(--muted)'}},
+        e('div',{style:{fontSize:32,marginBottom:8}},'🔍'),
+        e('div',{style:{fontWeight:700}},'No jobs match "'+search+'"')
+      )
     ),
     e('div',{style:{position:'fixed',bottom:24,right:20,display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end'}},
-    role==='admin'&&e('button',{onClick:onDatabase,style:{background:'var(--navy)',border:'1px solid rgba(255,255,255,.2)',borderRadius:24,padding:'10px 18px',color:'rgba(255,255,255,.8)',fontWeight:700,fontSize:13,cursor:'pointer',boxShadow:'0 4px 14px rgba(0,0,0,.3)'}},'📂 My Database'),
-    (role==='admin'||role==='shed_lead')&&e('button',{className:'fab',onClick:onNew},'+')
-  )
+      role==='admin'&&e('button',{onClick:onDatabase,style:{background:'var(--navy)',border:'1px solid rgba(255,255,255,.2)',borderRadius:24,padding:'10px 18px',color:'rgba(255,255,255,.8)',fontWeight:700,fontSize:13,cursor:'pointer',boxShadow:'0 4px 14px rgba(0,0,0,.3)'}},'📂 My Database'),
+      (role==='admin'||role==='shed_lead')&&e('button',{className:'fab',onClick:onNew},'+')
+    )
   );
 }
 /* ── DATABASE SCREEN ── */
