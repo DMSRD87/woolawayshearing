@@ -1749,12 +1749,12 @@ function BroadcastModal({job,onClose,farmList,crewList}){
     if(!msg.trim())return;
     setStatus('sending');
     const body=[
-      'Update from '+CONTRACTOR_NAME+' re: '+jobName+' —',
+      'Update from '+CONTRACTOR_NAME+' re: '+jobName+' -',
       '',
       msg.trim(),
       '',
-      'Do not reply to this message — contact me directly.',
-      '— '+CONTRACTOR_NAME+' via myGang'
+      'Do not reply to this message - contact me directly.',
+      '- '+CONTRACTOR_NAME+' via myGang'
     ].join('\n');
     const messages=crewWithPhone.map(id=>{const c=gcl(id);return{to:c.phone,body};});
     try{
@@ -1831,16 +1831,16 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
   const teamNames=job.crew.map(id=>gcl(id)).filter(Boolean).map(c=>c.name+' ('+c.role+')').join(', ');
   const jobName=job.jobName||(farm?farm.name:'Farm');
   return [
-    'Hi '+crew.name.split(' ')[0]+'! You\'ve been added to a job with '+CONTRACTOR_NAME+'.',
+    'Hi '+crew.name.split(' ')[0]+'! You have been added to a job with '+CONTRACTOR_NAME+'.',
     '',
-    '📋 '+jobName+' — '+job.type,
+    jobName+' - '+job.type,
     'Start: '+fmtDate(job.startDate)+'  End: '+fmtDate(endDate),
     'Sheep: '+job.totalSheep.toLocaleString(),
     farm?'Address: '+farm.address:'',
     '',
-    '👉 View job details: '+appUrl+'#job='+job.id+'&crew='+crewId,
-    'Do not reply to this message — contact me directly.',
-    '— '+CONTRACTOR_NAME+' via myGang'
+    'View job details: '+appUrl+'#job='+job.id+'&crew='+crewId,
+    'Do not reply to this message - contact me directly.',
+    '- '+CONTRACTOR_NAME+' via myGang'
   ].filter(l=>l!==null&&l!=='').join('\n');
 }
 
