@@ -767,15 +767,24 @@ async function hashPin(pin){
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-/* In-memory PIN cache loaded from Supabase */
+/* PIN cache — loaded from Supabase, persisted to localStorage as offline fallback */
+const LS_PINS='mg_pins_'+CONTRACTOR_SLUG;
 let _pinCache={lead:null,admin:null};
 let _pinLoaded=false;
 
 async function loadPins(){
   if(_pinLoaded)return;
+  /* Load from localStorage first so PINs work immediately offline */
+  const cached=lsGet(LS_PINS);
+  if(cached){_pinCache.lead=cached.lead||null;_pinCache.admin=cached.admin||null;}
   try{
     const {data}=await sb.from('contractor_settings').select('lead_pin_hash,admin_pin_hash').eq('contractor_slug',CONTRACTOR_SLUG).single();
-    if(data){_pinCache.lead=data.lead_pin_hash;_pinCache.admin=data.admin_pin_hash;}
+    if(data){
+      _pinCache.lead=data.lead_pin_hash;
+      _pinCache.admin=data.admin_pin_hash;
+      /* Keep localStorage in sync */
+      lsSet(LS_PINS,{lead:_pinCache.lead,admin:_pinCache.admin});
+    }
   }catch(e){}
   _pinLoaded=true;
 }
@@ -795,6 +804,8 @@ async function checkPin(type,entered){
 async function savePin(type,newVal){
   const hash=await hashPin(newVal);
   _pinCache[type]=hash;
+  /* Always persist to localStorage so offline access works */
+  lsSet(LS_PINS,{lead:_pinCache.lead,admin:_pinCache.admin});
   const update={contractor_slug:CONTRACTOR_SLUG,updated_at:new Date().toISOString()};
   update[type==='admin'?'admin_pin_hash':'lead_pin_hash']=hash;
   await sb.from('contractor_settings').upsert(update,{onConflict:'contractor_slug'});
@@ -2647,6 +2658,9 @@ function App(){
     const goOnline=async()=>{
       setIsOnline(true);
       setSaveStatus('syncing');
+      /* Queue any local jobs not yet uploaded — handles the debounce gap */
+      const localJobs=lsGet(LS_JOBS)||[];
+      localJobs.forEach(job=>queueWrite('job',job.id,job));
       const n=await flushQueue().catch(()=>0);
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
       if(n>0){setSaveStatus('saved');setTimeout(()=>setSaveStatus(''),2500);}
@@ -2680,7 +2694,7 @@ function App(){
         setSaveStatus('offline');
         setPendingCount((lsGet(LS_QUEUE)||[]).length);
       }
-    },1500);
+    },800);
   },[jobs,isOnline]);
 
   const addFarm=async f=>{setFarmList(p=>{const n=[...p,f];syncLookups(n,CREW);return n;});await dbSaveFarm(f).catch(()=>{});};
