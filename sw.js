@@ -1,15 +1,14 @@
-/* myGang Service Worker — offline-first caching */
-const CACHE = 'mygang-v5';
+/* myGang Service Worker — offline-first with network-first for app shell */
+const CACHE = 'mygang-v6';
 
 const PRECACHE = [
-  '/',
   'https://unpkg.com/react@18/umd/react.production.min.js',
   'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
   'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap',
 ];
 
-/* Install — cache all static assets */
+/* Install — cache static dependencies */
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE).then(cache => {
@@ -29,7 +28,7 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
-/* Fetch — serve from cache, fall back to network */
+/* Fetch strategy */
 self.addEventListener('fetch', event => {
   const url = event.request.url;
 
@@ -46,6 +45,22 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  /* Main app HTML — network first so deploys reach users immediately.
+     Falls back to cache if offline. */
+  if (event.request.mode === 'navigate' || url.endsWith('/') || url.endsWith('/index.html')) {
+    event.respondWith(
+      fetch(event.request).then(res => {
+        /* Update cache with fresh version */
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put(event.request, clone));
+        }
+        return res;
+      }).catch(() => caches.match(event.request).then(cached => cached || caches.match('/')))
+    );
+    return;
+  }
+
   /* Google Fonts — cache first */
   if (url.includes('fonts.g') || url.includes('fonts.googleapis') || url.includes('fonts.gstatic')) {
     event.respondWith(
@@ -58,7 +73,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  /* Everything else — cache first, network fallback */
+  /* JS/CSS dependencies — cache first, network fallback */
   event.respondWith(
     caches.match(event.request).then(cached => {
       if (cached) return cached;
