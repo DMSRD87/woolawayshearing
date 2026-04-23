@@ -444,10 +444,13 @@ async function flushQueue(){
   const failed=[];
   for(const item of q){
     try{
-      if(item.type==='job')await sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data,updated_at:new Date().toISOString()},{onConflict:'id'});
-      if(item.type==='farm')await sb.from('farms').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
-      if(item.type==='crew')await sb.from('crew_members').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
-      flushed++;
+      let res;
+      if(item.type==='job')res=await sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data,updated_at:new Date().toISOString()},{onConflict:'id'});
+      else if(item.type==='farm')res=await sb.from('farms').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
+      else if(item.type==='crew')res=await sb.from('crew_members').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
+      /* Check for Supabase error in response body — don't count as flushed if error */
+      if(res&&res.error){failed.push(item);}
+      else{flushed++;}
     }catch(e){failed.push(item);}
   }
   lsSet(LS_QUEUE,failed);
@@ -468,10 +471,23 @@ async function dbLoad(){
       crew:(cr.data||[]).map(r=>r.data),
       fromCache:false,
     };
-    /* Update local cache */
-    lsSet(LS_JOBS,result.jobs);
-    lsSet(LS_FARMS,result.farms);
-    lsSet(LS_CREW,result.crew);
+    /* Only overwrite local cache if no pending offline writes — 
+       if queue has items, local data is newer than Supabase */
+    const pendingQ=lsGet(LS_QUEUE)||[];
+    if(pendingQ.length===0){
+      lsSet(LS_JOBS,result.jobs);
+      lsSet(LS_FARMS,result.farms);
+      lsSet(LS_CREW,result.crew);
+    } else {
+      /* Merge: use local cache for jobs in queue, Supabase for others */
+      const qJobIds=new Set(pendingQ.filter(x=>x.type==='job').map(x=>x.id));
+      const localJobs=lsGet(LS_JOBS)||[];
+      const merged=result.jobs.map(j=>qJobIds.has(j.id)?localJobs.find(lj=>lj.id===j.id)||j:j);
+      result.jobs=merged;
+      lsSet(LS_JOBS,merged);
+      lsSet(LS_FARMS,result.farms);
+      lsSet(LS_CREW,result.crew);
+    }
     return result;
   }catch(e){
     /* Offline — serve from cache */
@@ -484,16 +500,21 @@ async function dbLoad(){
   }
 }
 async function dbSaveJob(job){
-  /* Always update local cache first */
+  /* Always write to local cache first — this survives page close */
   const jobs=lsGet(LS_JOBS)||[];
   const updated=jobs.find(j=>j.id===job.id)?jobs.map(j=>j.id===job.id?job:j):[job,...jobs];
   lsSet(LS_JOBS,updated);
+  /* Skip Supabase entirely if offline — avoids SW stub returning fake 200 */
+  if(!navigator.onLine){
+    queueWrite('job',job.id,job);
+    return;
+  }
   try{
-    await sb.from('jobs').upsert({id:job.id,contractor_slug:CONTRACTOR_SLUG,data:job,updated_at:new Date().toISOString()},{onConflict:'id'});
+    const {error}=await sb.from('jobs').upsert({id:job.id,contractor_slug:CONTRACTOR_SLUG,data:job,updated_at:new Date().toISOString()},{onConflict:'id'});
+    if(error)throw new Error(error.message);
     dequeue('job',job.id);
   }catch(e){
     queueWrite('job',job.id,job);
-    throw e;
   }
 }
 async function dbDeleteJob(jobId){
@@ -505,10 +526,12 @@ async function dbSaveFarm(farm){
   const farms=lsGet(LS_FARMS)||[];
   const updated=farms.find(f=>f.id===farm.id)?farms.map(f=>f.id===farm.id?farm:f):[farm,...farms];
   lsSet(LS_FARMS,updated);
+  if(!navigator.onLine){queueWrite('farm',farm.id,farm);return;}
   try{
-    await sb.from('farms').upsert({id:farm.id,contractor_slug:CONTRACTOR_SLUG,data:farm},{onConflict:'id'});
+    const {error}=await sb.from('farms').upsert({id:farm.id,contractor_slug:CONTRACTOR_SLUG,data:farm},{onConflict:'id'});
+    if(error)throw new Error(error.message);
     dequeue('farm',farm.id);
-  }catch(e){queueWrite('farm',farm.id,farm);throw e;}
+  }catch(e){queueWrite('farm',farm.id,farm);}
 }
 async function dbDeleteFarm(farmId){
   const farms=lsGet(LS_FARMS)||[];
@@ -519,10 +542,12 @@ async function dbSaveCrew(member){
   const crew=lsGet(LS_CREW)||[];
   const updated=crew.find(c=>c.id===member.id)?crew.map(c=>c.id===member.id?member:c):[member,...crew];
   lsSet(LS_CREW,updated);
+  if(!navigator.onLine){queueWrite('crew',member.id,member);return;}
   try{
-    await sb.from('crew_members').upsert({id:member.id,contractor_slug:CONTRACTOR_SLUG,data:member},{onConflict:'id'});
+    const {error}=await sb.from('crew_members').upsert({id:member.id,contractor_slug:CONTRACTOR_SLUG,data:member},{onConflict:'id'});
+    if(error)throw new Error(error.message);
     dequeue('crew',member.id);
-  }catch(e){queueWrite('crew',member.id,member);throw e;}
+  }catch(e){queueWrite('crew',member.id,member);}
 }
 let FARMS=[];
 let CREW=[];
@@ -2620,7 +2645,9 @@ function App(){
   /* Load on mount */
   useEffect(()=>{
     loadPins(); /* load PIN hashes from Supabase on mount */
-    dbLoad().then(({jobs:j,farms:f,crew:c,fromCache})=>{
+    /* Flush any pending offline writes before loading — ensures Supabase is up to date */
+    const pendingOnMount=lsGet(LS_QUEUE)||[];
+    const mountLoad=()=>dbLoad().then(({jobs:j,farms:f,crew:c,fromCache})=>{
       syncLookups(f,c);
       setJobs(j);setFarmList(f);setCrewList(c);
       setLoadedFromCache(fromCache);
@@ -2648,6 +2675,11 @@ function App(){
         window.location.hash='';
       }
     }).catch(()=>{setLoading(false);isLoaded.current=true;});
+    if(pendingOnMount.length>0&&navigator.onLine){
+      flushQueue().then(()=>mountLoad()).catch(()=>mountLoad());
+    } else {
+      mountLoad();
+    }
   },[]);
 
   /* Sync global lookups whenever lists update */
@@ -2658,15 +2690,20 @@ function App(){
     const goOnline=async()=>{
       setIsOnline(true);
       setSaveStatus('syncing');
-      /* Queue any local jobs not yet uploaded — handles the debounce gap */
+      /* First: make sure every local job is queued before flushing */
       const localJobs=lsGet(LS_JOBS)||[];
       localJobs.forEach(job=>queueWrite('job',job.id,job));
+      /* Flush queue to Supabase */
       const n=await flushQueue().catch(()=>0);
-      setPendingCount((lsGet(LS_QUEUE)||[]).length);
+      const remaining=(lsGet(LS_QUEUE)||[]).length;
+      setPendingCount(remaining);
       if(n>0){setSaveStatus('saved');setTimeout(()=>setSaveStatus(''),2500);}
       else setSaveStatus('');
-      /* Re-fetch from Supabase to get latest */
-      dbLoad().then(({jobs:j,farms:f,crew:c})=>{setJobs(j);setFarmList(f);setCrewList(c);});
+      /* Only re-fetch from Supabase if queue is fully clear — otherwise our 
+         local data is newer and we must not overwrite it */
+      if(remaining===0){
+        dbLoad().then(({jobs:j,farms:f,crew:c})=>{setJobs(j);setFarmList(f);setCrewList(c);});
+      }
     };
     const goOffline=()=>{setIsOnline(false);setSaveStatus('');};
     window.addEventListener('online',goOnline);
