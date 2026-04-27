@@ -659,6 +659,18 @@ const mkRates=(ov={})=>{
 const INIT_JOBS=[];
 const gf=id=>FARMS.find(f=>f.id===id);
 const gc=id=>CREW.find(c=>c.id===id);
+/* getJobRole — returns the role this crew member had ON THIS JOB.
+   Once a crew member is added to a job, their role is snapshotted in
+   job.rates.crewDetails[id].role. Reads should always go through this so
+   global role changes (e.g. promote a Wool Handler to Wool Classer) don't
+   retroactively rewrite past pay summaries. Falls back to live role for
+   crew added before this snapshot system existed. */
+const getJobRole=(job,id)=>{
+  const det=((job?.rates?.crewDetails)||{})[id]||{};
+  if(det.role)return det.role;
+  const c=gc(id);
+  return c?c.role:null;
+};
 const AVC=[{bg:'#78350f',fg:'#fbbf24'},{bg:'#14532d',fg:'#4ade80'},{bg:'#1e3a5f',fg:'#60a5fa'},{bg:'#7f1d1d',fg:'#f87171'},{bg:'#3b0764',fg:'#c084fc'},{bg:'#064e3b',fg:'#34d399'},{bg:'#7c2d12',fg:'#fb923c'},{bg:'#581c87',fg:'#e879f9'},{bg:'#0c4a6e',fg:'#38bdf8'},{bg:'#1a2e05',fg:'#a3e635'},{bg:'#431407',fg:'#fdba74'},{bg:'#1e1b4b',fg:'#818cf8'}];
 const avc=n=>AVC[n.charCodeAt(0)%AVC.length];
 const init=n=>n.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
@@ -722,7 +734,7 @@ function statusClass(s){return s==='Draft'?'draft':s==='Completed'?'completed':s
 const mobsOf=run=>run.mobs||[];
 function calcProg(job){
   /* Include both shearers and crutchers in progress count */
-  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
+  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
   let shorn=0,daysWorked=0;
   Object.entries(job.runs||{}).forEach(([,rs])=>{if(rs&&rs.length){daysWorked++;rs.forEach(run=>{mobsOf(run).forEach(mob=>{shIds.forEach(id=>{shorn+=mob.counts[id]||0;});});});}});
   /* Also count any counts regardless of role if no shearers/crutchers found */
@@ -785,17 +797,18 @@ function fmtPeriodLabel(start,end){
   return dn[sdt.getDay()]+' '+sd+' '+mo[sm-1]+' \u2013 '+dn[edt.getDay()]+' '+ed+' '+mo[em-1];
 }
 function calcPeriodStats(job,period){
-  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
+  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
   const rates=job.rates||{};
   let shorn=0,totalEarn=0;
   const inP=date=>date>=period.start&&date<=period.end;
   Object.entries(job.runs||{}).forEach(([date,rs])=>{if(!inP(date))return;rs.forEach(run=>{mobsOf(run).forEach(mob=>{const br=mob.rateOverride!=null?mob.rateOverride:(mob.type==='Shearing'?rates.shearingPerHead:rates.crutchingPerHead)||0;shIds.forEach(id=>{const cnt=mob.counts[id]||0;if(!cnt)return;shorn+=cnt;const load=(rates.shearerLoadings||{})[id]||0;totalEarn+=cnt*(br+load);});});});});
   // Shed staff
-  job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher').forEach(id=>{
+  job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher';}).forEach(id=>{
     const ov=(rates.crewOverrides||{})[id];const c=gc(id);if(!c)return;
-    const defR=c.role==='Wool Classer'?rates.classerPerRun:c.role==='Penner'?rates.pennerPerRun:c.role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
+    const role=getJobRole(job,id);
+    const defR=role==='Wool Classer'?rates.classerPerRun:role==='Penner'?rates.pennerPerRun:role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
     const rpr=ov||defR||80;
-    if(c.role==='Presser'){Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;const bales=(job.baleTallies[id]||{})[date]||0;totalEarn+=bales>(rates.baleThreshold||13)?bales*(rates.presserPerBale||14.20):runs*rpr;});}
+    if(role==='Presser'){Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;const bales=(job.baleTallies[id]||{})[date]||0;totalEarn+=bales>(rates.baleThreshold||13)?bales*(rates.presserPerBale||14.20):runs*rpr;});}
     else{Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;totalEarn+=runs*rpr;});}
     const tr2=rates.travelRate||{};
     totalEarn+=Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0)*(tr2[id]||0);
@@ -808,8 +821,8 @@ function calcPeriodStats(job,period){
 const pad=(str,len)=>String(str).padEnd(len,' ');
 function generateFarmRecord(job){
   const farm=gf(job.farmId);
-  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
-  const shedIds=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
+  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+  const shedIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher';});
   const dash='\u2500'.repeat(56);
   const dashEq='\u2550'.repeat(56);
   /* Group mobs by type+desc across entire job */
@@ -882,8 +895,8 @@ function generateFarmRecord(job){
 }
 function generateSummary(job,period){
   const farm=gf(job.farmId);const rates=job.rates||{};
-  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
-  const shedIds=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
+  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+  const shedIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher';});
   const dash='\u2500'.repeat(52);
   const inP=date=>!period||(date>=period.start&&date<=period.end);
   const shornBy={};shIds.forEach(id=>{shornBy[id]={sh:0,shEarn:0,cr:0,crEarn:0,mobs:[]};});
@@ -941,12 +954,13 @@ function generateSummary(job,period){
   L.push('');L.push(dash);L.push('');L.push('SHED STAFF');L.push(dash);
   shedIds.forEach(id=>{
     const c=gc(id);if(!c)return;
+    const role=getJobRole(job,id);
     const ov=(rates.crewOverrides||{})[id];
-    const defR=c.role==='Wool Classer'?rates.classerPerRun:c.role==='Penner'?rates.pennerPerRun:c.role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
+    const defR=role==='Wool Classer'?rates.classerPerRun:role==='Penner'?rates.pennerPerRun:role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
     const rpr=ov||defR||80;
     const totalRuns=Object.entries(job.shedTallies[id]||{}).filter(([d])=>inP(d)).reduce((a,[,b])=>a+b,0);
     const travel=trvl(id);let earn=0,earnLine='';
-    if(c.role==='Presser'){
+    if(role==='Presser'){
       let rEarn=0,bEarn=0;
       Object.entries(job.shedTallies[id]||{}).forEach(([date,runs])=>{if(!inP(date))return;const bales=(job.baleTallies[id]||{})[date]||0;if(bales>(rates.baleThreshold||13)){bEarn+=bales*(rates.presserPerBale||14.20);}else{rEarn+=runs*rpr;}});
       earn=rEarn+bEarn;
@@ -959,7 +973,7 @@ function generateSummary(job,period){
     const det=(rates.crewDetails||{})[id]||{};
     const taxPct=parseFloat(det.taxRate||0)||0;
     const taxAmt=taxPct>0?gross*(taxPct/100):0;
-    L.push('');L.push(c.name+' \u2014 '+(det.role||c.role));L.push(earnLine);
+    L.push('');L.push(c.name+' \u2014 '+role);L.push(earnLine);
     const tDays=travelDayCount(id);if(tDays)L.push('  Travel: '+tDays+' days x $'+(tr[id]||0).toFixed(2)+'/day = $'+travel.toFixed(2));
     L.push('  GROSS TOTAL: $'+gross.toFixed(2));
     if(taxPct>0){L.push('  Tax withheld ('+taxPct+'%): -$'+taxAmt.toFixed(2));L.push('  NET PAY: $'+(gross-taxAmt).toFixed(2));}
@@ -1042,6 +1056,13 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
   const type=label==='Admin PIN'?'admin':'lead';
 
   const tryPin=async p=>{
+    /* If an override PIN is supplied (e.g. a per-job PIN), verify against
+       it directly rather than going to Supabase for the role PIN. */
+    if(_overridePin!=null){
+      if(String(p)===String(_overridePin)){setErr('');onSuccess();}
+      else{setErr('Incorrect PIN');setEntry('');setTimeout(()=>setErr(''),1500);}
+      return;
+    }
     const ok=await checkPin(type,p);
     if(ok){setErr('');onSuccess();}
     else{setErr('Incorrect PIN');setEntry('');setTimeout(()=>setErr(''),1500);}
@@ -1060,29 +1081,26 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
         }
       } else if(step==='new1'){
         const np=newPin+n;
-        setNewPin(np);
-        if(np.length===6){setStep('new2');setEntry('');}
-        else setEntry(np);
+        if(np.length>6)return; /* cap at 6 digits */
+        setNewPin(np);setEntry(np);
       } else {
         const conf=entry+n;
+        if(conf.length>6)return; /* cap at 6 digits */
         setEntry(conf);
-        if(conf.length===6){
-          if(conf===newPin){
-            const pinType=_pinType||type;
-            savePin(pinType,newPin).then(()=>{
-              setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('✓ PIN changed — all devices updated!');
-              if(_onChanged)setTimeout(_onChanged,1500);
-              /* Reset role on PIN change for security */
-              lsSet(LS_ROLE,'read_only');lsSet(LS_ROLE_TS,0);
-            });
-          } else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
-        }
       }
       return;
     }
     const next=entry+n;
+    if(next.length>6)return; /* cap at 6 digits */
     setEntry(next);
-    if(next.length===6)tryPin(next);
+    /* Auto-submit ONLY at 6 digits when no override (back-compat with role PINs).
+       For shorter PINs (4-5), user taps Submit. With override (job PINs), auto-submit
+       at the override's exact length. */
+    if(_overridePin!=null){
+      if(next.length===String(_overridePin).length)tryPin(next);
+    } else if(next.length===6){
+      tryPin(next);
+    }
   };
 
   const del=()=>{
@@ -1094,6 +1112,30 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
 
   const startChange=()=>{setChanging(true);setStep('verify_current');setEntry('');setNewPin('');setErr('');};
 
+  /* Submit handler for variable-length PINs. Used when user has typed 4-5
+     digits and needs to commit (since auto-submit only fires at 6). */
+  const submitEntry=()=>{
+    if(changing){
+      if(step==='new1'){
+        if(newPin.length<4){setErr('PIN must be at least 4 digits');setTimeout(()=>setErr(''),1500);return;}
+        setStep('new2');setEntry('');
+      } else if(step==='new2'){
+        if(entry===newPin){
+          const pinType=_pinType||type;
+          savePin(pinType,newPin).then(()=>{
+            setChanging(false);setStep('enter');setNewPin('');setEntry('');setErr('✓ PIN changed — all devices updated!');
+            if(_onChanged)setTimeout(_onChanged,1500);
+            /* Reset role on PIN change for security */
+            lsSet(LS_ROLE,'read_only');lsSet(LS_ROLE_TS,0);
+          });
+        } else{setErr('PINs do not match');setEntry('');setNewPin('');setStep('new1');setTimeout(()=>setErr(''),1500);}
+      }
+      return;
+    }
+    if(entry.length<4){setErr('PIN must be at least 4 digits');setTimeout(()=>setErr(''),1500);return;}
+    tryPin(entry);
+  };
+
   const displayEntry=changing?(step==='new1'?newPin:entry):entry;
   const displayLabel=changing?(
     step==='verify_current'?'Enter Current PIN':
@@ -1101,8 +1143,15 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
   ):label;
   const displaySub=changing?(
     step==='verify_current'?'Verify your current PIN before changing':
-    step==='new1'?'Choose a new 6-digit PIN':'Re-enter to confirm'
+    step==='new1'?'Choose a 4-6 digit PIN':'Re-enter to confirm'
   ):subtitle;
+
+  /* Show a Submit button when:
+     - User is verifying a job-override PIN of any length (waits for full PIN)
+     - User is changing a PIN (new1/new2 steps need explicit submit since
+       length is variable)
+     - Always available as a "tap when ready" once 4+ digits typed */
+  const canSubmit=displayEntry.length>=4&&!err.includes('changed');
 
   return e('div',{className:'pin-screen'},
     e('div',{className:'pin-logo'},'my',e('em',null,'Gang')),
@@ -1119,6 +1168,12 @@ function PinPad({onSuccess,onCancel,label,subtitle,allowChange,changeLabel,_over
         e('button',{key:i,className:'pin-key',onClick:()=>press(String(k))},k)
       )
     ),
+    /* Submit button — visible when 4+ digits typed. Auto-submit at 6 still works for back-compat. */
+    canSubmit&&e('button',{
+      className:'pin-change-btn',
+      style:{background:'var(--green)',color:'#fff',fontWeight:700,marginTop:8},
+      onClick:submitEntry
+    },'✓ Submit '+displayEntry.length+'-digit PIN'),
     allowChange&&!changing&&e('button',{className:'pin-change-btn',onClick:startChange},changeLabel||'Change PIN'),
     onCancel&&!changing&&e('button',{className:'pin-change-btn',onClick:onCancel},'Cancel'),
     changing&&e('button',{className:'pin-change-btn',onClick:()=>{setChanging(false);setStep('enter');setEntry('');setNewPin('');}}, 'Cancel')
@@ -1199,7 +1254,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const todayStr=localToday();
   const dates=jobDates(job);
   const dayRuns=(job.runs||{})[viewDate]||[];
-  const shearers=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
+  const shearers=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
   /* STAND ORDER — persisted per-job. New shearers added later appear at end of the order. */
   const savedOrder=Array.isArray(job.shearerOrder)?job.shearerOrder:[];
   const orderedFromSaved=savedOrder.filter(id=>shearers.includes(id));
@@ -1207,7 +1262,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const orderedShearers=[...orderedFromSaved,...unorderedNew];
   const [reorderMode,setReorderMode]=useState(false);
   const [confirmDelRun,setConfirmDelRun]=useState(null); /* run id awaiting delete confirmation */
-  const shedStaff=job.crew.filter(id=>{const c=gc(id);return c&&(c.role==='Wool Handler'||c.role==='Wool Classer'||c.role==='Penner');});
+  const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Wool Handler'||r==='Wool Classer'||r==='Penner';});
   const pressers=job.crew.filter(id=>gc(id)?.role==='Presser');
   const rates=job.rates||{};
   const mobRunTot=mob=>shearers.reduce((s,id)=>s+(mob.counts[id]||0),0);
@@ -1505,7 +1560,7 @@ function SummaryTab({job,role}){
   const prevStart=period?addDays(period.start,-periodLen):null;
   const nextStart=period?addDays(period.start,periodLen):null;
   const btnLabel=d=>{const [,mo,dy]=d.split('-').map(Number);const dt=new Date(d.split('-')[0],mo-1,dy);const dn=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];return dn[dt.getDay()]+' '+String(dy).padStart(2,'0')+'/'+String(mo).padStart(2,'0');};
-  const shIds=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
+  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
   const totalJobShorn=Object.values(job.runs||{}).flat().flatMap(r=>mobsOf(r)).reduce((s,mob)=>s+shIds.reduce((a,id)=>a+(mob.counts[id]||0),0),0);
 
   return e('div',{className:'summary-wrap'},
@@ -1614,10 +1669,10 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
     setSaved(true);setTimeout(()=>setSaved(false),2000);
   };
 
-  const shearers=job.crew.filter(id=>gc(id)&&(gc(id).role==='Shearer'||gc(id).role==='Crutcher'));
+  const shearers=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
   const crutchers=job.crew.filter(id=>gc(id)?.role==='Crutcher');
   const loadingCrew=[...shearers,...crutchers]; /* shearers + crutchers get $/head loadings */
-  const shedStaff=job.crew.filter(id=>gc(id)&&gc(id).role!=='Shearer'&&gc(id).role!=='Crutcher');
+  const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher';});
   const DAY_FULL_=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
   return e('div',{className:'admin-wrap'},
@@ -1669,10 +1724,11 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
       e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Per Person Rate Overrides'),e('div',{className:'admin-sec-sub'},'Override default $/run for individuals')),
       shedStaff.map(id=>{
         const c=gc(id);if(!c)return null;
+        const role=getJobRole(job,id);
         const cur=(draft.crewOverrides||{})[id]??'';
-        const defR=c.role==='Wool Classer'?draft.classerPerRun:c.role==='Penner'?draft.pennerPerRun:c.role==='Presser'?draft.presserPerRun:draft.woolHandlerPerRun;
+        const defR=role==='Wool Classer'?draft.classerPerRun:role==='Penner'?draft.pennerPerRun:role==='Presser'?draft.presserPerRun:draft.woolHandlerPerRun;
         return e('div',{key:id,className:'loading-row'},
-          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+' — default $'+defR+'/run'))),
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},role+' — default $'+defR+'/run'))),
           e('div',{className:'lr-r'},e('span',{className:'lr-prefix'},'$'),e('input',{type:'number',className:'lr-inp',value:cur,placeholder:defR,step:'1',onChange:ev=>setOv(id,ev.target.value)}),e('span',{className:'lr-unit'},'/run'))
         );
       })
@@ -1980,6 +2036,24 @@ function EditFarmModal({farm,onSave,onClose}){
 
 function OverviewTab({job,role,onSend,onBroadcast,canSend,onEditFarm,isDraft,onPublish}){
   const farm=gf(job.farmId);
+  const [views,setViews]=useState({});
+
+  /* Fetch view receipts (Admin only) so the crew list shows who has opened
+     their job card. Auto-refreshes every 30s while this tab is open. */
+  useEffect(()=>{
+    if(role!=='admin')return;
+    let cancelled=false;
+    const fetchViews=async()=>{
+      try{
+        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG);
+        if(!cancelled&&data){const v={};data.forEach(r=>{v[r.crew_id]=r.viewed_at;});setViews(v);}
+      }catch(e){}
+    };
+    fetchViews();
+    const t=setInterval(fetchViews,30000);
+    return()=>{cancelled=true;clearInterval(t);};
+  },[job.id,role]);
+
   const IC=({l,v,full})=>e('div',{className:'ic'+(full?' full-ic':'')},e('div',{className:'ic-l'},l),e('div',{className:'ic-v'},v));
   return e('div',null,
     e('div',{style:{height:12}}),
@@ -1987,7 +2061,26 @@ function OverviewTab({job,role,onSend,onBroadcast,canSend,onEditFarm,isDraft,onP
     job.notes_job&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Notes'),e('div',{className:'ic-v',style:{fontSize:'13px',color:'var(--muted)',fontWeight:400}},job.notes_job))),
     farm&&e('div',{style:{padding:'0 16px',marginBottom:10}},e('div',{className:'ic'},e('div',{className:'ic-l'},'Farm Address'),e('div',{className:'ic-v'},farm.address),farm.notes&&e('div',{style:{fontSize:'12px',color:'var(--dim)',marginTop:4}},farm.notes),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(farm.address),target:'_blank',className:'map-link'},'📍 Open in Maps')),role==='admin'&&onEditFarm&&e('button',{className:'map-link',style:{marginTop:6,display:'block',color:'var(--amber)',cursor:'pointer',background:'none',border:'none',padding:0,fontSize:13},onClick:onEditFarm},'✏️ Edit farm details')),
     e('div',{className:'crew-hdr'},e('span',null,'Crew — '+job.crew.length)),
-    job.crew.map(id=>{const c=gc(id);if(!c)return null;return e('div',{key:id,className:'crew-row'},e('div',{className:'cr-l'},e(Av,{name:c.name}),e('div',null,e('div',{className:'cr-name'},c.name,c.hasVehicle&&e('span',{className:'car-tag'},'🚗')),e('div',{className:'cr-role'},c.role))),role==='admin'&&e('div',{style:{fontFamily:'var(--m)',fontSize:'11px',color:'var(--dim)'}},c.phone));}),
+    job.crew.map(id=>{
+      const c=gc(id);if(!c)return null;
+      const role_for_job=getJobRole(job,id)||c.role;
+      const viewedAt=views[id];
+      return e('div',{key:id,className:'crew-row'},
+        e('div',{className:'cr-l'},
+          e(Av,{name:c.name}),
+          e('div',null,
+            e('div',{className:'cr-name'},c.name,c.hasVehicle&&e('span',{className:'car-tag'},'🚗')),
+            e('div',{className:'cr-role'},role_for_job),
+            /* View-receipt indicator (Admin only) */
+            role==='admin'&&c.phone&&(viewedAt
+              ?e('div',{style:{fontSize:11,color:'var(--green)',fontWeight:700,marginTop:2}},'👁 Viewed '+fmtViewed(viewedAt))
+              :e('div',{style:{fontSize:11,color:'var(--dim)',marginTop:2}},'⌛ Not yet opened')
+            )
+          )
+        ),
+        role==='admin'&&e('div',{style:{fontFamily:'var(--m)',fontSize:'11px',color:'var(--dim)'}},c.phone)
+      );
+    }),
     /* Draft → show Publish button instead of Send */
     isDraft&&role==='admin'&&onPublish&&e('div',{className:'send-bar'},
       e('button',{className:'send-btn',onClick:onPublish,style:{background:'linear-gradient(135deg,#dc2626,#991b1b)',boxShadow:'0 4px 16px rgba(220,38,38,.3)'}},'🚀 Publish Job & Send Cards to Crew')
@@ -2480,6 +2573,14 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       setSubmitErr('Please select at least one crew member. To save without crew, use "Save as Draft".');
       return;
     }
+    /* Snapshot each crew member's CURRENT role into crewDetails for this job.
+       This way, future global role changes won't retroactively rewrite this
+       job's pay history. (Bug fix — Apr 2026.) */
+    const initialCrewDetails={};
+    selCrew.forEach(id=>{
+      const c=crewList.find(cr=>cr.id===id);
+      if(c)initialCrewDetails[id]={role:c.role};
+    });
     onCreate({
       id:'j'+Date.now(),
       jobNumber:String(Math.floor(2104+Math.random()*50)).padStart(6,'0'),
@@ -2494,7 +2595,8 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       status:asDraft?'Draft':'Active',crew:selCrew,
       jobPin:rJobPin.current?.value?.trim()||null,
       jobName:rJobName.current?.value?.trim()||'',
-      rates:mkRates(),runs:{},shedTallies:{},baleTallies:{},baleBF:{},travelTallies:{},dayNotes:{}
+      rates:{...mkRates(),crewDetails:initialCrewDetails},
+      runs:{},shedTallies:{},baleTallies:{},baleBF:{},travelTallies:{},dayNotes:{}
     });
   };
 
@@ -2551,7 +2653,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew}){
       e(FF,{label:'Notes'},e('textarea',{className:'fi',rows:3,placeholder:'e.g. Merino full CRT and wig.',ref:rNotes})),
       e(FF,{label:'Job PIN (optional)'},
         e('div',null,
-          e('input',{type:'number',className:'fi',placeholder:'Leave blank for no PIN — e.g. 4821',ref:rJobPin,maxLength:6,inputMode:'numeric'}),
+          e('input',{type:'number',className:'fi',placeholder:'4-6 digits, leave blank for no PIN',ref:rJobPin,maxLength:6,inputMode:'numeric'}),
           e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'🔒 If set, crew must enter this PIN to open the job.')
         )
       ),
@@ -2604,6 +2706,16 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
     const sheep=rSheep.current?.value?.trim();
     const startDate=rStartDate.current?.value||job.startDate;
     if(!farmId||!days||!sheep){setSubmitErr('Farm, days and sheep are required.');return;}
+    /* Snapshot roles for any NEW crew members being added.
+       Preserve existing snapshots so historical role context is kept. */
+    const existingDetails=(job.rates?.crewDetails)||{};
+    const newDetails={...existingDetails};
+    selCrew.forEach(id=>{
+      if(!newDetails[id]?.role){
+        const c=crewList.find(cr=>cr.id===id);
+        if(c)newDetails[id]={...(newDetails[id]||{}),role:c.role};
+      }
+    });
     onSave({
       ...job,
       farmId,type,
@@ -2617,6 +2729,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
       jobPin:rJobPin.current?.value?.trim()||null,
       jobName:rJobName.current?.value?.trim()||'',
       crew:selCrew,
+      rates:{...(job.rates||{}),crewDetails:newDetails},
     });
   };
 
@@ -2699,7 +2812,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
         e('textarea',{className:'fi',rows:3,defaultValue:job.notes_job||'',placeholder:'e.g. Merino full CRT and wig.',ref:rNotes})),
       e(FF,{label:'Job PIN (optional)'},
         e('div',null,
-          e('input',{type:'number',className:'fi',defaultValue:job.jobPin||'',placeholder:'Leave blank for no PIN',ref:rJobPin,inputMode:'numeric'}),
+          e('input',{type:'number',className:'fi',defaultValue:job.jobPin||'',placeholder:'4-6 digits, leave blank for no PIN',ref:rJobPin,inputMode:'numeric'}),
           e('div',{style:{fontSize:'11px',color:'var(--muted)',marginTop:5}},'🔒 If set, crew must enter this PIN to open the job.')
         )
       ),
@@ -3345,7 +3458,12 @@ function App(){
       /* Only re-fetch from Supabase if queue is fully clear — otherwise our 
          local data is newer and we must not overwrite it */
       if(remaining===0){
-        dbLoad().then(({jobs:j,farms:f,crew:c})=>{setJobs(j);setFarmList(f);setCrewList(c);});
+        dbLoad().then(({jobs:j,farms:f,crew:c})=>{
+          /* CRITICAL: sync globals BEFORE setting state so gf()/gc() return correct
+             values during the next render. Otherwise jobs render as "Unknown". */
+          syncLookups(f,c);
+          setJobs(j);setFarmList(f);setCrewList(c);
+        });
       }
     };
     const goOffline=()=>{setIsOnline(false);setSaveStatus('');};
