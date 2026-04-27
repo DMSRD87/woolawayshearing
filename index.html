@@ -671,6 +671,26 @@ const getJobRole=(job,id)=>{
   const c=gc(id);
   return c?c.role:null;
 };
+
+/* migrateJobRoles — backfills crewDetails.role from the LIVE crew record for
+   any crew member on this job that doesn't yet have a per-job role snapshot.
+   Runs on load. Without this migration, legacy jobs (created before the
+   snapshot system) still leak global role changes into past pay summaries. */
+function migrateJobRoles(job,crewArr){
+  const cd={...(job?.rates?.crewDetails||{})};
+  let changed=false;
+  (job.crew||[]).forEach(id=>{
+    if(!cd[id]?.role){
+      const c=(crewArr||CREW).find(x=>x.id===id);
+      if(c){
+        cd[id]={...(cd[id]||{}),role:c.role};
+        changed=true;
+      }
+    }
+  });
+  if(!changed)return job;
+  return {...job,rates:{...(job.rates||{}),crewDetails:cd}};
+}
 const AVC=[{bg:'#78350f',fg:'#fbbf24'},{bg:'#14532d',fg:'#4ade80'},{bg:'#1e3a5f',fg:'#60a5fa'},{bg:'#7f1d1d',fg:'#f87171'},{bg:'#3b0764',fg:'#c084fc'},{bg:'#064e3b',fg:'#34d399'},{bg:'#7c2d12',fg:'#fb923c'},{bg:'#581c87',fg:'#e879f9'},{bg:'#0c4a6e',fg:'#38bdf8'},{bg:'#1a2e05',fg:'#a3e635'},{bg:'#431407',fg:'#fdba74'},{bg:'#1e1b4b',fg:'#818cf8'}];
 const avc=n=>AVC[n.charCodeAt(0)%AVC.length];
 const init=n=>n.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
@@ -835,13 +855,13 @@ function generateFarmRecord(job){
     target[desc]+=cnt;
   });});});
   /* Total bales */
-  const pressers=job.crew.filter(id=>gc(id)?.role==='Presser');
+  const pressers=job.crew.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Presser');
   const totalBales=pressers.reduce((s,id)=>s+Object.values(job.baleTallies[id]||{}).reduce((a,b)=>a+b,0)+(job.baleBF[id]||0),0);
   /* Days actually worked */
   const datesWorked=Object.keys(job.runs||{}).filter(d=>(job.runs[d]||[]).some(run=>mobsOf(run).some(mob=>shIds.some(id=>(mob.counts[id]||0)>0)))).sort();
   /* Shed staff breakdown by role */
   const staffByRole={};
-  shedIds.forEach(id=>{const c=gc(id);if(!c)return;if(!staffByRole[c.role])staffByRole[c.role]=0;staffByRole[c.role]++;});
+  shedIds.forEach(id=>{const c=gc(id);if(!c)return;const r=getJobRole(job,id)||c.role;if(!staffByRole[r])staffByRole[r]=0;staffByRole[r]++;});
   const today=localToday();
   const L=[];
   L.push(dashEq);
@@ -1263,7 +1283,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const [reorderMode,setReorderMode]=useState(false);
   const [confirmDelRun,setConfirmDelRun]=useState(null); /* run id awaiting delete confirmation */
   const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Wool Handler'||r==='Wool Classer'||r==='Penner';});
-  const pressers=job.crew.filter(id=>gc(id)?.role==='Presser');
+  const pressers=job.crew.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Presser');
   const rates=job.rates||{};
   const mobRunTot=mob=>shearers.reduce((s,id)=>s+(mob.counts[id]||0),0);
   const runTot=run=>mobsOf(run).reduce((s,mob)=>s+mobRunTot(mob),0);
@@ -1298,7 +1318,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const hasCrutch=Object.values(job.runs||{}).flat().some(run=>mobsOf(run).some(m=>m.type==='Crutching'));
   const stats=shearerStats(job,viewDate,shearers);
   const mts=mobTotals(job,viewDate,shearers);
-  const roleGroups=[{lbl:'WOOL HANDLER',ids:shedStaff.filter(id=>gc(id)?.role==='Wool Handler')},{lbl:'CLASSER',ids:shedStaff.filter(id=>gc(id)?.role==='Wool Classer')},{lbl:'PENNER',ids:shedStaff.filter(id=>gc(id)?.role==='Penner')}].filter(g=>g.ids.length>0);
+  const roleGroups=[{lbl:'WOOL HANDLER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Wool Handler')},{lbl:'CLASSER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Wool Classer')},{lbl:'PENNER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Penner')}].filter(g=>g.ids.length>0);
 
   return e('div',null,
     /* DATE STRIP */
@@ -1475,7 +1495,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
           e(Av,{name:c.name,size:32}),
           e('div',{className:'staff-info'},
             e('div',{className:'staff-name'},c.name),
-            e('div',{className:'staff-rate-lbl'},c.role+(isAdmin&&rate?' · $'+rate+'/day':''))
+            e('div',{className:'staff-rate-lbl'},(getJobRole(job,id)||c.role)+(isAdmin&&rate?' · $'+rate+'/day':''))
           ),
           e('div',{className:'staff-stats'},
             e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Today'),
@@ -1670,8 +1690,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
   };
 
   const shearers=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
-  const crutchers=job.crew.filter(id=>gc(id)?.role==='Crutcher');
-  const loadingCrew=[...shearers,...crutchers]; /* shearers + crutchers get $/head loadings */
+  const loadingCrew=shearers; /* shearers + crutchers get $/head loadings — already included in `shearers` */
   const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher';});
   const DAY_FULL_=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
@@ -1742,7 +1761,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
         const cur=(draft.shearerLoadings||{})[id]??'';
         const ltype=(draft.loadingType||{})[id]||'individual';
         return e('div',{key:id,className:'loading-row',style:{flexWrap:'wrap',gap:8}},
-          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role))),
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},getJobRole(job,id)||c.role))),
           e('div',{className:'lr-r',style:{gap:6}},
             e('span',{className:'lr-prefix'},'+$'),
             e('input',{type:'number',className:'lr-inp',value:cur,placeholder:'0',step:'0.05',onChange:ev=>setLoad(id,ev.target.value)}),
@@ -1764,7 +1783,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
         const rate=(draft.travelRate||{})[id]??'';
         const days=Object.values((job.travelTallies||{})[id]||{}).reduce((a,b)=>a+(b?1:0),0);
         return e('div',{key:id,className:'loading-row'},
-          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},c.role+(days?' · '+days+' day'+(days!==1?'s':''):'')))),
+          e('div',{className:'lr-l'},e(Av,{name:c.name,size:32}),e('div',null,e('div',{className:'lr-name'},c.name),e('div',{className:'lr-role'},(getJobRole(job,id)||c.role)+(days?' · '+days+' day'+(days!==1?'s':''):'')))),
           e('div',{className:'lr-r',style:{gap:6}},
             e('span',{className:'lr-prefix'},'$'),
             e('input',{type:'number',className:'tr-inp',style:{width:58},value:rate,placeholder:'40',step:'5',onChange:ev=>setTR(id,ev.target.value)}),
@@ -2167,7 +2186,7 @@ function JobCardView({job,crewId,onClose}){
         e('div',{key:lbl,className:'jcw-f'},e('div',{className:'jcw-fl'},lbl),isAddr?e('div',null,e('div',{className:'jcw-fv'},val),e('a',{href:'https://maps.google.com/?q='+encodeURIComponent(val),target:'_blank',className:'map-btn'},'📍 Open in Maps')):e('div',{className:'jcw-fv'},val))
       ),
       job.notes_job&&e('div',{className:'jcw-f'},e('div',{className:'jcw-fl'},'Further Details'),e('div',{className:'jcw-fv',style:{fontSize:'14px',color:'#444'}},job.notes_job)),
-      e('div',{className:'jcw-f'},e('div',{className:'jcw-fl'},'Your Team'),team.map(c=>e('div',{key:c.id,className:'team-item'},e('div',{style:{width:36,height:36,borderRadius:'50%',background:avc(c.name).bg,color:avc(c.name).fg,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'var(--h)',fontSize:'14px',fontWeight:'700',flexShrink:0}},init(c.name)),e('div',null,e('div',{className:'ti-name'},c.name),e('div',{className:'ti-role'},c.role),c.hasVehicle&&e('div',{className:'ti-car'},'🚗 Has a vehicle')))))
+      e('div',{className:'jcw-f'},e('div',{className:'jcw-fl'},'Your Team'),team.map(c=>e('div',{key:c.id,className:'team-item'},e('div',{style:{width:36,height:36,borderRadius:'50%',background:avc(c.name).bg,color:avc(c.name).fg,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'var(--h)',fontSize:'14px',fontWeight:'700',flexShrink:0}},init(c.name)),e('div',null,e('div',{className:'ti-name'},c.name),e('div',{className:'ti-role'},getJobRole(job,c.id)||c.role),c.hasVehicle&&e('div',{className:'ti-car'},'🚗 Has a vehicle')))))
     )
   ));
 }
@@ -2265,7 +2284,7 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
   if(!crew)return null;
   const jds=jobDates(job);
   const endDate=jds.length?jds[jds.length-1]:job.startDate;
-  const teamNames=job.crew.map(id=>gcl(id)).filter(Boolean).map(c=>c.name+' ('+c.role+')').join(', ');
+  const teamNames=job.crew.map(id=>{const c=gcl(id);if(!c)return null;return {c,id};}).filter(Boolean).map(({c,id})=>c.name+' ('+(getJobRole(job,id)||c.role)+')').join(', ');
   const jobName=job.jobName||(farm?farm.name:'Farm');
   return [
     'Hi '+crew.name.split(' ')[0]+'! You have been added to a job with '+CONTRACTOR_NAME+'.',
@@ -2330,7 +2349,7 @@ function CrewSMSRow({id,c,views,status,onPreview,job,farmList,crewList,appUrl}){
       e(Av,{name:c.name,size:40}),
       e('div',null,
         e('div',{className:'sms-name'},c.name),
-        e('div',{className:'sms-role'},c.role),
+        e('div',{className:'sms-role'},getJobRole(job,id)||c.role),
         e('div',{className:'sms-ph'},c.phone||e('span',{style:{color:'var(--red)'}},'No number')),
         viewedAt&&e('div',{style:{fontSize:11,color:'var(--green)',fontWeight:700,marginTop:2}},'👁 Viewed '+fmtViewed(viewedAt))
       )
@@ -3405,7 +3424,11 @@ function App(){
     const pendingOnMount=lsGet(LS_QUEUE)||[];
     const mountLoad=()=>dbLoad().then(({jobs:j,farms:f,crew:c,fromCache})=>{
       syncLookups(f,c);
-      setJobs(j);setFarmList(f);setCrewList(c);
+      /* Migrate legacy jobs — backfill crewDetails.role for any crew member
+         that doesn't yet have a per-job role snapshot. Prevents global role
+         changes from retroactively rewriting past pay summaries. */
+      const migratedJobs=j.map(job=>migrateJobRoles(job,c));
+      setJobs(migratedJobs);setFarmList(f);setCrewList(c);
       setLoadedFromCache(fromCache);
       setLoading(false);isLoaded.current=true;
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
@@ -3462,7 +3485,9 @@ function App(){
           /* CRITICAL: sync globals BEFORE setting state so gf()/gc() return correct
              values during the next render. Otherwise jobs render as "Unknown". */
           syncLookups(f,c);
-          setJobs(j);setFarmList(f);setCrewList(c);
+          /* Migrate legacy jobs — backfill crewDetails.role for any crew without snapshot */
+          const migratedJobs=j.map(job=>migrateJobRoles(job,c));
+          setJobs(migratedJobs);setFarmList(f);setCrewList(c);
         });
       }
     };
