@@ -543,14 +543,23 @@ async function flushQueue(){
   const failed=[];
   for(const item of q){
     try{
-      let res;
-      if(item.type==='job')res=await sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data,updated_at:new Date().toISOString()},{onConflict:'id'});
-      else if(item.type==='farm')res=await sb.from('farms').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
-      else if(item.type==='crew')res=await sb.from('crew_members').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
+      let call;
+      if(item.type==='job')call=sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data,updated_at:new Date().toISOString()},{onConflict:'id'});
+      else if(item.type==='farm')call=sb.from('farms').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
+      else if(item.type==='crew')call=sb.from('crew_members').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
+      /* Cap each upsert at 5s — prevents one hanging item from stalling
+         the whole queue flush. */
+      const res=await withTimeout(call,5000,'flush_timeout');
       /* Check for Supabase error in response body — don't count as flushed if error */
-      if(res&&res.error){failed.push(item);}
+      if(res&&res.error){
+        failed.push(item);
+        logSaveFailure('error',item.type+':'+item.id,res.error.message);
+      }
       else{flushed++;}
-    }catch(e){failed.push(item);}
+    }catch(e){
+      failed.push(item);
+      logSaveFailure(e.message==='flush_timeout'?'timeout':'error',item.type+':'+item.id,e.message);
+    }
   }
   lsSet(LS_QUEUE,failed);
   return flushed;
@@ -559,11 +568,30 @@ async function flushQueue(){
 /* ── DB HELPERS ── */
 async function dbLoad(){
   try{
-    const [jr,fr,cr]=await Promise.all([
+    /* Cap each select at 8s — if Supabase hangs we fall through to cache.
+       Without this, dbLoad can sit forever on a marginal connection,
+       blocking app startup. */
+    const [jr,fr,cr]=await withTimeout(Promise.all([
       sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false}),
       sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG),
       sb.from('crew_members').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG),
-    ]);
+    ]),8000,'load_timeout');
+    /* CRITICAL: if any of the three calls returned an error (or the SW
+       offline stub returned fake-200-with-error), DO NOT trust the result.
+       Treat as offline — fall through to cache. Without this check, a
+       marginal connection could overwrite localStorage with empty arrays
+       and destroy unsaved local state. */
+    if((jr&&jr.error)||(fr&&fr.error)||(cr&&cr.error)){
+      logSaveFailure('error','dbLoad',
+        'jr.error='+(jr?.error?.message||'')+';fr.error='+(fr?.error?.message||'')+';cr.error='+(cr?.error?.message||'')
+      );
+      return{
+        jobs:lsGet(LS_JOBS)||[],
+        farms:lsGet(LS_FARMS)||[],
+        crew:lsGet(LS_CREW)||[],
+        fromCache:true,
+      };
+    }
     const result={
       jobs:(jr.data||[]).map(r=>r.data),
       farms:(fr.data||[]).map(r=>r.data),
@@ -589,7 +617,8 @@ async function dbLoad(){
     }
     return result;
   }catch(e){
-    /* Offline — serve from cache */
+    /* Offline or load_timeout — serve from cache */
+    if(e.message==='load_timeout')logSaveFailure('timeout','dbLoad',e.message);
     return{
       jobs:lsGet(LS_JOBS)||[],
       farms:lsGet(LS_FARMS)||[],
@@ -598,6 +627,43 @@ async function dbLoad(){
     };
   }
 }
+/* withTimeout — race a promise against a setTimeout. Used to cap Supabase
+   calls that can hang silently on poor signal. If the timeout wins, the
+   returned promise rejects with a labelled error so callers can route it
+   to queue + log. The original work may still complete in the background;
+   that's fine — at worst we have a duplicate write to localStorage which
+   the queue dedupes by id. */
+function withTimeout(promise,ms,label){
+  let timer;
+  const timeout=new Promise((_,reject)=>{
+    timer=setTimeout(()=>reject(new Error(label||'timeout')),ms);
+  });
+  return Promise.race([promise,timeout]).finally(()=>clearTimeout(timer));
+}
+
+/* logSaveFailure — best-effort forensic insert. Captures save failures so
+   we can investigate later. The log call itself has its OWN short timeout
+   and any failure is swallowed — logging must NEVER affect the save flow. */
+function logSaveFailure(reason,jobId,details){
+  try{
+    const payload={
+      contractor_slug:CONTRACTOR_SLUG,
+      job_id:jobId||null,
+      reason:reason||'unknown',
+      details:(details||'').toString().slice(0,1000), /* cap long stack traces */
+      user_agent:(navigator.userAgent||'').slice(0,500),
+      online_status:navigator.onLine,
+      queue_length:(lsGet(LS_QUEUE)||[]).length
+    };
+    /* Fire and forget. 3s timeout. Errors silently ignored. */
+    withTimeout(
+      sb.from('save_failures').insert(payload).then(()=>{}),
+      3000,
+      'log_timeout'
+    ).catch(()=>{});
+  }catch(e){ /* never break the save flow */ }
+}
+
 async function dbSaveJob(job){
   /* Always write to local cache first — this survives page close */
   const jobs=lsGet(LS_JOBS)||[];
@@ -608,12 +674,28 @@ async function dbSaveJob(job){
     queueWrite('job',job.id,job);
     return;
   }
+  /* Online path: cap the upsert at 5 seconds to prevent silent hangs.
+     A hanging upsert on poor signal that never resolves is the EXACT
+     bug pattern that wiped Cutting Edge job 002125 — without a timeout
+     the await never returns, the catch block never fires, and the data
+     never makes it to the queue. */
   try{
-    const {error}=await sb.from('jobs').upsert({id:job.id,contractor_slug:CONTRACTOR_SLUG,data:job,updated_at:new Date().toISOString()},{onConflict:'id'});
-    if(error)throw new Error(error.message);
+    const upsertCall=sb.from('jobs').upsert(
+      {id:job.id,contractor_slug:CONTRACTOR_SLUG,data:job,updated_at:new Date().toISOString()},
+      {onConflict:'id'}
+    );
+    const result=await withTimeout(upsertCall,5000,'upsert_timeout');
+    if(result&&result.error)throw new Error(result.error.message);
     dequeue('job',job.id);
   }catch(e){
+    /* Queue for retry on next online event or mountLoad */
     queueWrite('job',job.id,job);
+    /* Log forensically — fire-and-forget, never throws */
+    logSaveFailure(
+      e.message==='upsert_timeout'?'timeout':'error',
+      job.id,
+      e.message
+    );
   }
 }
 async function dbDeleteJob(jobId){
@@ -627,10 +709,14 @@ async function dbSaveFarm(farm){
   lsSet(LS_FARMS,updated);
   if(!navigator.onLine){queueWrite('farm',farm.id,farm);return;}
   try{
-    const {error}=await sb.from('farms').upsert({id:farm.id,contractor_slug:CONTRACTOR_SLUG,data:farm},{onConflict:'id'});
-    if(error)throw new Error(error.message);
+    const upsertCall=sb.from('farms').upsert({id:farm.id,contractor_slug:CONTRACTOR_SLUG,data:farm},{onConflict:'id'});
+    const result=await withTimeout(upsertCall,5000,'upsert_timeout');
+    if(result&&result.error)throw new Error(result.error.message);
     dequeue('farm',farm.id);
-  }catch(e){queueWrite('farm',farm.id,farm);}
+  }catch(e){
+    queueWrite('farm',farm.id,farm);
+    logSaveFailure(e.message==='upsert_timeout'?'timeout':'error','farm:'+farm.id,e.message);
+  }
 }
 async function dbDeleteFarm(farmId){
   const farms=lsGet(LS_FARMS)||[];
@@ -643,10 +729,14 @@ async function dbSaveCrew(member){
   lsSet(LS_CREW,updated);
   if(!navigator.onLine){queueWrite('crew',member.id,member);return;}
   try{
-    const {error}=await sb.from('crew_members').upsert({id:member.id,contractor_slug:CONTRACTOR_SLUG,data:member},{onConflict:'id'});
-    if(error)throw new Error(error.message);
+    const upsertCall=sb.from('crew_members').upsert({id:member.id,contractor_slug:CONTRACTOR_SLUG,data:member},{onConflict:'id'});
+    const result=await withTimeout(upsertCall,5000,'upsert_timeout');
+    if(result&&result.error)throw new Error(result.error.message);
     dequeue('crew',member.id);
-  }catch(e){queueWrite('crew',member.id,member);}
+  }catch(e){
+    queueWrite('crew',member.id,member);
+    logSaveFailure(e.message==='upsert_timeout'?'timeout':'error','crew:'+member.id,e.message);
+  }
 }
 let FARMS=[];
 let CREW=[];
@@ -3416,6 +3506,12 @@ function App(){
   const [previewId,setPreviewId]=useState(null);
   const saveTimer=useRef(null);
   const isLoaded=useRef(false);
+  /* dirtyRef tracks whether React state has user changes not yet saved to BOTH localStorage AND Supabase.
+     dbLoad refuses to overwrite local state while dirty — prevents races losing tallies. */
+  const dirtyRef=useRef(false);
+  /* jobsRef holds the latest jobs state so that event handlers (goOnline, beforeunload, visibilitychange)
+     can read current React state synchronously. Updated whenever jobs state changes via the effect below. */
+  const jobsRef=useRef([]);
 
   /* Load on mount */
   useEffect(()=>{
@@ -3469,19 +3565,26 @@ function App(){
     const goOnline=async()=>{
       setIsOnline(true);
       setSaveStatus('syncing');
-      /* First: make sure every local job is queued before flushing */
-      const localJobs=lsGet(LS_JOBS)||[];
-      localJobs.forEach(job=>queueWrite('job',job.id,job));
+      /* CRITICAL: queue writes from CURRENT REACT STATE, not stale localStorage.
+         The user may have typed tallies that are in React state but haven't yet
+         been written to localStorage by the debounced auto-save. */
+      const currentJobs=jobsRef.current.length>0?jobsRef.current:(lsGet(LS_JOBS)||[]);
+      currentJobs.forEach(job=>queueWrite('job',job.id,job));
       /* Flush queue to Supabase */
       const n=await flushQueue().catch(()=>0);
       const remaining=(lsGet(LS_QUEUE)||[]).length;
       setPendingCount(remaining);
       if(n>0){setSaveStatus('saved');setTimeout(()=>setSaveStatus(''),2500);}
       else setSaveStatus('');
-      /* Only re-fetch from Supabase if queue is fully clear — otherwise our 
-         local data is newer and we must not overwrite it */
-      if(remaining===0){
+      /* Only re-fetch from Supabase if:
+         (a) queue is fully clear (otherwise our local data is newer), AND
+         (b) we have NO unsaved changes in React state (otherwise we'd lose them).
+         The dirtyRef check is the critical protection against the auto-save race. */
+      if(remaining===0&&!dirtyRef.current){
         dbLoad().then(({jobs:j,farms:f,crew:c})=>{
+          /* Double-check dirty hasn't flipped during the await — if user typed
+             during the dbLoad, abort the overwrite. */
+          if(dirtyRef.current)return;
           /* CRITICAL: sync globals BEFORE setting state so gf()/gc() return correct
              values during the next render. Otherwise jobs render as "Unknown". */
           syncLookups(f,c);
@@ -3497,14 +3600,23 @@ function App(){
     return()=>{window.removeEventListener('online',goOnline);window.removeEventListener('offline',goOffline);};
   },[]);
 
-  /* Auto-save jobs debounced 1.5s — always saves to local cache, queues if offline */
+  /* Keep jobsRef in sync so async handlers can read current state synchronously */
+  useEffect(()=>{jobsRef.current=jobs;},[jobs]);
+
+  /* Auto-save jobs debounced 400ms — always saves to local cache, queues if offline.
+     Sets dirtyRef=true on every state change; clears only after successful save of ALL jobs.
+     This dirty flag is checked by goOnline → dbLoad to prevent overwriting unsaved local edits. */
   useEffect(()=>{
     if(!isLoaded.current)return;
+    /* Mark dirty AS SOON AS user makes a change. Cleared only on save success. */
+    dirtyRef.current=true;
     clearTimeout(saveTimer.current);
     setSaveStatus(isOnline?'saving':'offline');
     saveTimer.current=setTimeout(async()=>{
       try{
         await Promise.all(jobs.map(job=>dbSaveJob(job)));
+        /* Save complete — clear dirty flag so dbLoad can refresh from Supabase if needed */
+        dirtyRef.current=false;
         if(isOnline){
           setSaveStatus('saved');
           setPendingCount(0);
@@ -3514,11 +3626,41 @@ function App(){
           setPendingCount((lsGet(LS_QUEUE)||[]).length);
         }
       }catch(err){
+        /* Save failed — keep dirty so we don't risk overwriting local with stale Supabase */
         setSaveStatus('offline');
         setPendingCount((lsGet(LS_QUEUE)||[]).length);
       }
-    },800);
+    },400);
   },[jobs,isOnline]);
+
+  /* CRITICAL: Save immediately on tab hide / before unload.
+     If user types a tally and then locks phone or backgrounds the app within the 400ms
+     debounce, the save would never fire. This handler flushes pending changes synchronously.
+     localStorage is synchronous and survives unload; Supabase upserts are fire-and-forget
+     (they queue via the offline path if they don't complete in time). */
+  useEffect(()=>{
+    if(!isLoaded.current)return;
+    const flushNow=()=>{
+      /* Cancel any pending debounce — we're saving now */
+      clearTimeout(saveTimer.current);
+      const currentJobs=jobsRef.current;
+      if(!currentJobs||currentJobs.length===0)return;
+      /* dbSaveJob writes localStorage synchronously then returns a promise for Supabase.
+         Even if the page unloads mid-Supabase-call, localStorage is already written. */
+      currentJobs.forEach(job=>{
+        try{dbSaveJob(job);}catch(e){}
+      });
+    };
+    const onVis=()=>{if(document.visibilityState==='hidden')flushNow();};
+    window.addEventListener('beforeunload',flushNow);
+    window.addEventListener('pagehide',flushNow);
+    document.addEventListener('visibilitychange',onVis);
+    return()=>{
+      window.removeEventListener('beforeunload',flushNow);
+      window.removeEventListener('pagehide',flushNow);
+      document.removeEventListener('visibilitychange',onVis);
+    };
+  },[]);
 
   const addFarm=async f=>{setFarmList(p=>{const n=[...p,f];syncLookups(n,CREW);return n;});await dbSaveFarm(f).catch(()=>{});};
   const addCrew=async c=>{setCrewList(p=>{const n=[...p,c];syncLookups(FARMS,n);return n;});await dbSaveCrew(c).catch(()=>{});};
