@@ -3530,39 +3530,26 @@ function App(){
       setPendingCount((lsGet(LS_QUEUE)||[]).length);
       /* Deep link: #job=JOB_ID&crew=CREW_ID opens that job on Overview tab and logs view */
       const hash=window.location.hash;
-      logSaveFailure('debug_deeplink','hash_check','hash="'+hash+'"');
       const jobMatch=hash.match(/[#&]job=([^&]+)/);
       const crewMatch=hash.match(/[#&]crew=([^&]+)/);
-      logSaveFailure('debug_deeplink','match_result','jobMatch='+(jobMatch?jobMatch[1]:'null')+';crewMatch='+(crewMatch?crewMatch[1]:'null'));
       if(jobMatch){
         const jid=jobMatch[1];
         const cid=crewMatch?crewMatch[1]:null;
         const found=j.find(x=>x.id===jid);
-        logSaveFailure('debug_deeplink','found_job','jid='+jid+';found='+(found?'yes':'no')+';total_jobs='+j.length);
         if(found){setSelJobId(jid);setScreen('job');setDeepLinkTab('overview');}
         /* Log the view to Supabase */
         if(jid&&cid){
-          logSaveFailure('debug_deeplink','about_to_upsert',jid+'_'+cid);
           sb.from('job_views').upsert({
             id:jid+'_'+cid,
             contractor_slug:CONTRACTOR_SLUG,
             job_id:jid,
             crew_id:cid,
             viewed_at:new Date().toISOString()
-          },{onConflict:'id'}).then(res=>{
-            logSaveFailure('debug_deeplink','upsert_response','status='+(res?.status||'?')+';error='+(res?.error?.message||'none'));
-          }).catch(e=>{
-            logSaveFailure('debug_deeplink','upsert_threw',e?.message||String(e));
-          });
-        } else {
-          logSaveFailure('debug_deeplink','skipped_upsert','jid='+jid+';cid='+cid);
+          },{onConflict:'id'}).catch(()=>{});
         }
         window.location.hash='';
       }
-    }).catch(e=>{
-      logSaveFailure('debug_deeplink','mountload_caught',e?.message||String(e));
-      setLoading(false);isLoaded.current=true;
-    });
+    }).catch(()=>{setLoading(false);isLoaded.current=true;});
     if(pendingOnMount.length>0&&navigator.onLine){
       flushQueue().then(()=>mountLoad()).catch(()=>mountLoad());
     } else {
