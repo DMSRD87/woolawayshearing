@@ -523,7 +523,17 @@ const LS_LAST_RATES='mg_last_rates_'+CONTRACTOR_SLUG;
 const LS_ROLE_TS='mg_role_ts_'+CONTRACTOR_SLUG;
 const LS_DATA_VERSION='mg_data_version_'+CONTRACTOR_SLUG; /* tracks DATA_VERSION for one-time cache wipe */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.5.2'; /* BUG FIX over v4.5.1. iOS Safari Supabase JS client's .upsert() method occasionally returns a non-Promise value, causing .catch() chain to throw "is not a function". This was inside mountLoad and the throw bubbled to mountLoad.catch which set isFresh=false — the actual root cause of the multi-contractor wipe bug. Fix: wrapped deep-link logic in try/catch + Promise.resolve so any throw is contained and cannot poison the fresh state. */
+const APP_VERSION='v4.5.5'; /* CRITICAL FIX over v4.5.4. The useEffect that installs
+  visibilitychange / beforeunload / pagehide / pageshow handlers was gated by an early
+  return: if(!isLoaded.current)return;. Because that effect has [] deps and isLoaded.current
+  is only set true asynchronously inside mountLoad's .then(), the gate ALWAYS triggered on
+  mount and the effect returned without installing any listeners. The effect never re-ran
+  (deps were []). So in production NO ONE had lifecycle handlers installed. Result: when
+  iOS Safari aggressively killed tabs (constant for shed leads with phones in pockets), the
+  400ms autosave debounce timer was killed before firing — local edits sat in localStorage
+  but next mountLoad overwrote them with Supabase. Confirmed by 7 days of telemetry showing
+  ZERO diag_visibility / diag_pageshow / diag_pagehide entries across 1,936 iPhone autosave
+  events. v4.5.4 cross-job save fix carried forward. */
 const DATA_VERSION='2026-05-05-iphone-fix'; /* Bump to force one-time localStorage cache wipe on next boot, ensuring all devices start clean with the iPhone bugfix in place. */
 
 const lsGet=k=>{try{return JSON.parse(localStorage.getItem(k)||'null');}catch{return null;}};
@@ -872,6 +882,26 @@ function jobDates(j){
       const dow=new Date(y,mo-1,dy).getDay();
       if(dow!==0&&dow!==6){ds.push(d);added++;}
       i++;
+    }
+  }
+  /* PATCH v4.5.3: Sheds run over allocated days. For Active jobs, extend the
+     date strip past daysAllocated up to today so tallies can still be entered.
+     Honors includeWeekends. Inactive jobs (Completed/Charged Out/Draft/
+     Dispatched) remain capped at daysAllocated. */
+  if((j.status||'Active')==='Active'){
+    const today=localToday();
+    let cursor=ds.length>0?ds[ds.length-1]:j.startDate;
+    let safety=0;
+    while(cursor<today&&safety<400){
+      cursor=addDays(cursor,1);
+      if(includeWeekends){
+        ds.push(cursor);
+      } else {
+        const [y,mo,dy]=cursor.split('-').map(Number);
+        const dow=new Date(y,mo-1,dy).getDay();
+        if(dow!==0&&dow!==6)ds.push(cursor);
+      }
+      safety++;
     }
   }
   return ds;
@@ -3540,7 +3570,7 @@ function ScheduleScreen({jobs,role,setRole,onBack,onJob,onNew,onNewDraft}){
 }
 
 /* ── APP ── */
-const CONTRACTOR_NAME='Woolaway Shearing Co.';
+const CONTRACTOR_NAME='Woolaway Shearing';
 const CONTRACTOR_URL='https://woolawayshearing.vercel.app';
 function App(){
   const [appUnlocked,setAppUnlocked]=useState(true);
@@ -3605,6 +3635,13 @@ function App(){
        a) Mount-load auto-save echo (writing Supabase data straight back to Supabase, wasted I/O)
        b) Mount-load false dirty (causing goOnline to skip future refresh because "we have unsaved work") */
   const suppressNextSaveRef=useRef(false);
+  /* PATCH v4.5.4: Per-job baseline. Maps job.id → the job reference we last saved.
+     The autosave effect compares each job's current reference to this baseline; only
+     jobs whose reference has changed are saved. Because setSelJob (and all other
+     setJobs callers) use prev.map(...), unchanged jobs keep their old reference and
+     are correctly identified as not-dirty. This stops one device from uploading its
+     stale view of every other job and overwriting concurrent edits made elsewhere. */
+  const lastSavedRef=useRef(new Map());
 
   /* Load on mount */
   useEffect(()=>{
@@ -3760,11 +3797,20 @@ function App(){
          Pushing it would cause the multi-contractor wipe bug. Instead, try a fresh dbLoad
          to upgrade ourselves to fresh, then queue legitimately-fresh state. */
       if(isFreshRef.current){
-        /* CRITICAL: queue writes from CURRENT REACT STATE, not stale localStorage.
-           The user may have typed tallies that are in React state but haven't yet
-           been written to localStorage by the debounced auto-save. */
+        /* PATCH v4.5.4: Only queue jobs that have changed since last save.
+           The old behaviour queued ALL jobs from React state on every online event,
+           which was a key vector for the multi-device overwrite bug — coming back
+           online would re-upload this device's stale view of every job, even ones
+           another device had just edited. */
         const currentJobs=jobsRef.current;
-        currentJobs.forEach(job=>queueWrite('job',job.id,job));
+        let queued=0;
+        currentJobs.forEach(job=>{
+          if(lastSavedRef.current.get(job.id)!==job){
+            queueWrite('job',job.id,job);
+            queued++;
+          }
+        });
+        logSaveFailure('diag_save','goOnline_queued','total='+currentJobs.length+';queued='+queued);
       }else{
         logSaveFailure('diag_save','goOnline_skipped_queue','not_fresh;jobs='+jobsRef.current.length);
       }
@@ -3842,8 +3888,19 @@ function App(){
        don't treat it as user input. Don't mark dirty, don't push to Supabase. */
     if(suppressNextSaveRef.current){
       suppressNextSaveRef.current=false;
+      /* PATCH v4.5.4: System-driven setJobs (mountLoad / goOnline refetch / visibility
+         revalidate) installs Supabase's view as the new baseline. After this point, any
+         job whose reference differs from this baseline is genuinely user-edited. */
+      const m=new Map();
+      jobs.forEach(j=>m.set(j.id,j));
+      lastSavedRef.current=m;
       return;
     }
+    /* PATCH v4.5.4: Identify ONLY the jobs whose reference has changed since last save.
+       setSelJob etc. return new arrays via .map but only the touched job has a new
+       reference. Saving every job on every keystroke (the old behaviour) overwrote
+       concurrent edits made on other devices to OTHER jobs. */
+    const changedJobs=jobs.filter(job=>lastSavedRef.current.get(job.id)!==job);
     /* Mark dirty FIRST — before the isFresh gate. We need this set even when blocking
        Supabase saves so that any subsequent dbLoad refresh won't overwrite user input. */
     dirtyRef.current=true;
@@ -3851,17 +3908,35 @@ function App(){
        when we can't push to Supabase. This is the user's own work; it should
        never be lost just because the cloud is stale. */
     try{lsSet(LS_JOBS,jobs);}catch(e){}
+    if(changedJobs.length===0){
+      /* Nothing actually changed (jobs array reference shifted but every job is
+         reference-equal to the baseline). Bail out — saving would just upload stale
+         state that someone else may have moved past in Supabase. */
+      logSaveFailure('diag_save','autosave_nothing_changed','jobs='+jobs.length);
+      dirtyRef.current=false;
+      return;
+    }
     if(!isFreshRef.current){
-      logSaveFailure('diag_save','autosave_blocked_stale','jobs='+jobs.length+';local_cached');
+      logSaveFailure('diag_save','autosave_blocked_stale','jobs='+jobs.length+';changed='+changedJobs.length+';local_cached');
       return;
     }
     clearTimeout(saveTimer.current);
     setSaveStatus(isOnline?'saving':'offline');
+    /* Capture the IDs we're committing to save in this pass. The actual job object
+       we send is read fresh from jobsRef at save time — state may have moved on
+       during the 400ms debounce, and we want the latest. */
+    const idsToSave=changedJobs.map(j=>j.id);
     saveTimer.current=setTimeout(async()=>{
       try{
-        await Promise.all(jobs.map(job=>dbSaveJob(job)));
-        /* Save complete — clear dirty flag so dbLoad can refresh from Supabase if needed */
-        dirtyRef.current=false;
+        const latest=jobsRef.current;
+        const toSave=latest.filter(j=>idsToSave.includes(j.id));
+        logSaveFailure('diag_save','autosave_firing','total='+latest.length+';saving='+toSave.length+';ids='+idsToSave.join(','));
+        await Promise.all(toSave.map(job=>dbSaveJob(job)));
+        /* Update baseline for jobs we just saved */
+        toSave.forEach(j=>lastSavedRef.current.set(j.id,j));
+        /* Re-check dirty — state may have changed during the await */
+        const stillDirty=jobsRef.current.some(j=>lastSavedRef.current.get(j.id)!==j);
+        if(!stillDirty)dirtyRef.current=false;
         if(isOnline){
           setSaveStatus('saved');
           setPendingCount(0);
@@ -3894,7 +3969,11 @@ function App(){
      localStorage is synchronous and survives unload; Supabase upserts are fire-and-forget
      (they queue via the offline path if they don't complete in time). */
   useEffect(()=>{
-    if(!isLoaded.current)return;
+    /* PATCH v4.5.5: Removed `if(!isLoaded.current)return;` gate. With [] deps, the effect
+       only runs once on mount, and isLoaded.current is still false at that moment
+       (mountLoad's setting of true happens in an async .then). The gate ALWAYS triggered,
+       the effect returned, and no listeners were ever installed. flushNow / onVis self-check
+       isFreshRef internally so they're safe to install before mountLoad finishes. */
     const flushNow=()=>{
       /* Cancel any pending debounce — we're saving now */
       clearTimeout(saveTimer.current);
@@ -3907,10 +3986,14 @@ function App(){
       }
       const currentJobs=jobsRef.current;
       if(!currentJobs||currentJobs.length===0)return;
-      /* dbSaveJob writes localStorage synchronously then returns a promise for Supabase.
-         Even if the page unloads mid-Supabase-call, localStorage is already written. */
+      /* PATCH v4.5.4: Only flush jobs that have changed since last save.
+         Otherwise an unrelated visibility-hide (phone lock during normal use) would
+         re-upload this device's view of every job — same multi-device overwrite vector
+         as the autosave bug. */
       currentJobs.forEach(job=>{
-        try{dbSaveJob(job);}catch(e){}
+        if(lastSavedRef.current.get(job.id)!==job){
+          try{dbSaveJob(job);}catch(e){}
+        }
       });
     };
     /* PATCH v4.5.0: On visibility change, also handle the resume case.
