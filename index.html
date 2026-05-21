@@ -526,20 +526,36 @@ const LS_ROLE_TS='mg_role_ts_'+CONTRACTOR_SLUG;
 const LS_DATA_VERSION='mg_data_version_'+CONTRACTOR_SLUG; /* tracks DATA_VERSION for one-time cache wipe */
 const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queue, separate from whole-job queue */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.2-storage-rebuild'; /* v4.6.2 adds hostname-mismatch
-  detection at boot. Closes the cache-flip class of bug: when a phone has
-  multiple contractors' service workers installed, the browser sometimes
-  serves the WRONG contractor's cached app for a given URL. v4.6.1 relied
-  on the contractor PIN screen rejecting the wrong user; v4.6.2 catches
-  the mismatch earlier and forces a network reload, recovering automatically
-  without the user needing to manually close and reopen the app.
+const APP_VERSION='v4.6.3-storage-rebuild'; /* v4.6.3 closes the data-loss
+  vectors that survived v4.6.2. The Woolaway incident on 21 May 2026 showed
+  three structural gaps even after v4.6.2:
 
-  v4.6.1 (carried forward): storage rebuild moving tally cells into a
-  dedicated tally_entries table. Per-cell upsert on user input.
-  hydrateTallies on load. dbSaveJob strips tally fields from Supabase
-  writes via deep-cloned buildStrippedJobBlob (LS_JOBS keeps full tallies
-  for offline fallback). goOnline always refetches tallies even when
-  full dbLoad refetch is skipped. */
+  (1) flushQueue wrote item.data raw to Supabase, bypassing
+      buildStrippedJobBlob — so any job that landed in the offline queue
+      could carry stale tally counts back to jobs.data. Fixed: flushQueue
+      now applies the same strip as dbSaveJob.
+
+  (2) Nothing prevented a save with FEWER run_ids than tally_entries had.
+      A stale device's React state with truncated runs could overwrite the
+      jobs.data.runs structure, leaving cells orphaned in tally_entries
+      (data present in DB but no run structure to display them under).
+      Fixed: dbSaveJob now queries tally_entries for distinct run_ids
+      before writing. If the about-to-save blob is MISSING any run_ids
+      that tally_entries has, the save is refused, queued for retry, and
+      logged as guard_rejected_shrink_save.
+
+  (3) When jobs.data.runs is partial but tally_entries has more, the app
+      had no recovery — orphaned cells stayed invisible. Fixed: dbLoad
+      now runs a self-heal step. Any tally_entries row whose (date,
+      run_id, mob_id) isn't in jobs.data.runs gets a synthesized run/mob
+      entry created (with empty desc/type — recoverable, user can edit).
+
+  Plus: diag_save logs added to goJob direct-save path so every save is
+  traceable in future incidents.
+
+  v4.6.2 (carried forward): hostname-mismatch boot guard, storage rebuild
+  with tally_entries, dbSaveJob strip via buildStrippedJobBlob,
+  goOnline tally refetch. */
 const DATA_VERSION='2026-05-18-storage-rebuild'; /* Bump forces one-time localStorage wipe so all devices start clean on the new storage model. */
 
 /* ════════════════════════════════════════════════════════════════════
@@ -622,7 +638,17 @@ async function flushQueue(){
   for(const item of q){
     try{
       let call;
-      if(item.type==='job')call=sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data,updated_at:new Date().toISOString()},{onConflict:'id'});
+      if(item.type==='job'){
+        /* v4.6.3 FIX: strip tally fields here too. Previous versions wrote
+           item.data raw, which meant any job that ever entered the queue
+           (offline saves, goOnline preserveDirty path, dbSaveJob catch
+           fallback) bypassed the tally strip and could carry stale tally
+           counts back into jobs.data on flush. */
+        const strippedData=(typeof buildStrippedJobBlob==='function')
+          ?buildStrippedJobBlob(item.data)
+          :item.data;
+        call=sb.from('jobs').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:strippedData,updated_at:new Date().toISOString()},{onConflict:'id'});
+      }
       else if(item.type==='farm')call=sb.from('farms').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
       else if(item.type==='crew')call=sb.from('crew_members').upsert({id:item.id,contractor_slug:CONTRACTOR_SLUG,data:item.data},{onConflict:'id'});
       /* Cap each upsert at 5s — prevents one hanging item from stalling
@@ -865,6 +891,45 @@ async function dbLoad(){
     const byJob={};
     tallyRows.forEach(r=>{(byJob[r.job_id]||(byJob[r.job_id]=[])).push(r);});
     result.jobs.forEach(j=>hydrateTallies(j,byJob[j.id]||[]));
+    /* v4.6.3 — self-heal step. If tally_entries has run_ids or (date,run,mob)
+       combos that aren't in the job's runs structure, the cells are
+       orphaned: present in the DB, invisible in the UI. This happens when
+       a stale device wrote a truncated runs structure (the Woolaway 21 May
+       incident). Synthesize the missing run/mob entries from tally_entries
+       so the orphan data renders. Synthesized mobs have empty desc and
+       default type='Shearing' — the user can edit labels later. The
+       hydrated counts are correct because they came from tally_entries. */
+    result.jobs.forEach(j=>{
+      const rows=byJob[j.id]||[];
+      if(!rows.length)return;
+      if(!j.runs)j.runs={};
+      let healed=0;
+      rows.forEach(row=>{
+        if(row.kind!=='count')return;
+        if(!row.run_id||!row.mob_id||!row.cell_date)return;
+        if(!j.runs[row.cell_date])j.runs[row.cell_date]=[];
+        let run=j.runs[row.cell_date].find(r=>r.id===row.run_id);
+        if(!run){
+          run={id:row.run_id,mobs:[]};
+          j.runs[row.cell_date].push(run);
+          healed++;
+        }
+        if(!run.mobs)run.mobs=[];
+        let mob=run.mobs.find(m=>m.id===row.mob_id);
+        if(!mob){
+          mob={id:row.mob_id,desc:'',type:'Shearing',counts:{}};
+          run.mobs.push(mob);
+          healed++;
+        }
+        /* Counts already populated by hydrateTallies — don't overwrite */
+        if(mob.counts[row.crew_id]==null){
+          mob.counts[row.crew_id]=Number(row.value)||0;
+        }
+      });
+      if(healed>0){
+        try{logSaveFailure('diag_load','self_heal','job='+j.id+';synthesized='+healed);}catch(e){}
+      }
+    });
     /* Only overwrite local cache if no pending offline writes — 
        if queue has items, local data is newer than Supabase */
     const pendingQ=lsGet(LS_QUEUE)||[];
@@ -982,6 +1047,57 @@ async function dbSaveJob(job){
      the await never returns, the catch block never fires, and the data
      never makes it to the queue. */
   try{
+    /* v4.6.3 — Save-time guard against shrinking runs.
+       Before writing jobs.data to Supabase, check tally_entries for the
+       distinct run_ids that have cell data for this job. If the
+       about-to-save blob is MISSING any of those run_ids, that means our
+       React state has a runs structure that's truncated relative to
+       reality. Refuse the save, queue for retry, log.
+
+       This is the structural fix for the Woolaway 21 May 2026 incident
+       where Dale's laptop wrote a 3-run blob over a 10-run state, leaving
+       Wed and Thu cells orphaned in tally_entries with no run structure
+       to display them under. */
+    try{
+      const tallyRunIdsResult=await withTimeout(
+        sb.from('tally_entries')
+          .select('run_id')
+          .eq('contractor_slug',CONTRACTOR_SLUG)
+          .eq('job_id',job.id)
+          .eq('kind','count')
+          .not('run_id','eq',''),
+        3000,
+        'guard_runids_timeout'
+      ).catch(err=>({error:{message:'guard_runids_failed:'+err.message}}));
+      if(tallyRunIdsResult&&!tallyRunIdsResult.error&&Array.isArray(tallyRunIdsResult.data)){
+        const tallyRunIds=new Set(tallyRunIdsResult.data.map(r=>r.run_id).filter(Boolean));
+        if(tallyRunIds.size>0){
+          const blobRunIds=new Set();
+          Object.values((jobForBlob&&jobForBlob.runs)||{}).forEach(dayRuns=>{
+            (dayRuns||[]).forEach(run=>{if(run&&run.id)blobRunIds.add(run.id);});
+          });
+          const missing=[...tallyRunIds].filter(rid=>!blobRunIds.has(rid));
+          if(missing.length>0){
+            logSaveFailure(
+              'guard_rejected_shrink_save',
+              job.id,
+              'missing_run_ids='+missing.join(',')+';blob_count='+blobRunIds.size+';tally_count='+tallyRunIds.size
+            );
+            /* Queue the FULL job (with all original structure preserved from
+               React state) so the next save attempt retries. Don't write
+               this incomplete state to Supabase. */
+            queueWrite('job',job.id,jobForBlob);
+            return;
+          }
+        }
+      }
+    }catch(guardErr){
+      /* Guard query itself failed (network, timeout). Don't block the save
+         on a failed guard — fall through to the legacy pre-save guard and
+         normal upsert. We'd rather risk a partial save than refuse every
+         save on a flaky network. */
+      logSaveFailure('guard_query_error',job.id,(guardErr&&guardErr.message)||'unknown');
+    }
     /* PATCH v4.5.0 — Pre-save guard (preserved). Now operates on stripped
        blob, but the run-DATE keys are unchanged by stripping (only the
        counts within mobs are emptied), so the guard still functions as
@@ -4385,7 +4501,17 @@ function App(){
     /* Save current job immediately before switching */
     if(selJobId&&selJobId!==id){
       const current=jobs.find(j=>j.id===selJobId);
-      if(current)dbSaveJob(current).catch(()=>{});
+      if(current){
+        /* v4.6.3 — diag log so every direct save is traceable. The
+           Woolaway incident had a save at 10:55:27 with no diag trail
+           because goJob's direct dbSaveJob never logged. */
+        try{
+          const runIds=[];
+          Object.values((current.runs||{})).forEach(d=>(d||[]).forEach(r=>{if(r&&r.id)runIds.push(r.id);}));
+          logSaveFailure('diag_save','goJob_direct','job='+current.id+';from='+selJobId+';to='+id+';run_ids='+runIds.join(','));
+        }catch(e){}
+        dbSaveJob(current).catch(()=>{});
+      }
     }
     const job=jobs.find(j=>j.id===id);
     if(job?.jobPin&&role!=='admin'){
