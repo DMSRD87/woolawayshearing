@@ -525,8 +525,9 @@ const LS_LAST_RATES='mg_last_rates_'+CONTRACTOR_SLUG;
 const LS_ROLE_TS='mg_role_ts_'+CONTRACTOR_SLUG;
 const LS_DATA_VERSION='mg_data_version_'+CONTRACTOR_SLUG; /* tracks DATA_VERSION for one-time cache wipe */
 const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queue, separate from whole-job queue */
+const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.3f'; /* v4.6.3f FEATURES (builds on v4.6.3e — deploy ONLY after 3e soak is clean): (1) MESS RATE — per-person $/day deduction; 3-state per-day toggle on Tally tab (Off ◯ / Half ½ / Full ●) stored as tally_entries kind='mess' multiplier 0/0.5/1 with run_id=mob_id=''; rate = crewDetails[id].messRate override else role default $35 shearer/crutcher $10 staff (resolveMessRate); Admin tab Mess Rate section; pay summary line 'Mess: N full + M half x $R/day = -$T'. (2) SUNDRIES — itemised per-person deductions in NEW sundries_entries table (run schema SQL BEFORE deploying this file); lead adds, admin edits/deletes via Summary-tab panel; pay summary itemises with subtotal. Both deduct POST-tax: GROSS → tax → mess → sundries → NET TOTAL. CONTRACTOR TOTALS gains conditional deduction lines + NET JOB TOTAL; math check extends through net when deductions exist. REGRESSION GUARANTEE: jobs with zero mess + zero sundries produce byte-identical pay output to v4.6.3e. calcPeriodStats now returns {shorn,totalEarn,messDeduction,sundriesDeduction,netEarn} — totalEarn stays gross. v4.6.3e SAFETY RELEASE (6 Jun 2026, after Knights/Bywong double incident): (1) delRun/delMob cascade deletes now scoped to cell_date=viewDate — run_id-only delete destroyed same-run cells on OTHER dates; (2) dbLoad merge now consults LS_TALLY_QUEUE as well as LS_QUEUE — a day of offline cells + silently-failed flush previously let the server's empty hydration overwrite the local day ("worked all day, lost it at night"); because flushTallyQueue retains only failed rows, post-flush queue state doubles as the flush-success gate; (3) jobDates guarantees today (Active jobs) and every date with existing data appear in the strip regardless of includeWeekends — weekend work was silently landing on the last visible weekday via defDate fallback; (4) new tappable banner when online+fresh but queued entries remain ("N entries not yet on server — tap to retry. Don't clear app data") — closes the silent state that drove users to clear site data and destroy the only copy. NO pay calc changes. v4.6.3d.1b CALC HOTFIX: Presser pay calc was iterating only shedTallies dates, which meant days where the presser pressed bales (or kg) WITHOUT entering shed_runs were skipped entirely from pay calculation. Real money bug — e.g. Whitey on Burragundy had 19 bales on Jun 2 with no shed_runs that day, calc never visited Jun 2 → $269.80 missing from his pay. Fix iterates union of shedTallies, baleTallies, baleWeights date keys so all days with any presser activity are evaluated. Applied to both calcPeriodStats (totals) and generateSummary (pay breakdown). All-runs and all-bales cases unchanged. v4.6.3d.1a hotfix: Presser hybrid-day pay summary display fix — when a presser had BOTH per-bale days AND per-run days in the same job, the displayed breakdown used totalRuns/totalBales summed across all days, producing math that didn't add up (e.g. "23 bales @ $14.20 = $213" when only 15 bales were actually paid per-bale and the other 8 were on a per-run day). Total earn was always correct; only the readable breakdown was wrong. Fix tracks paidRuns/paidBales separately so the line items match the math. All-bale and all-run cases unchanged. v4.6.3d.1 hotfix: (1) Map link handles goo.gl/Maps URLs as addresses by detecting http(s):// and passing through instead of wrapping in maps.google.com search query; (2) Defensive guard on job.baleWeights access in cpk-mode pay calc (was a crash hazard on old jobs without the field if pressMode was toggled to cpk); (3) Guard all 7 unguarded job.totalSheep.toLocaleString() crash sites with ||0 (was a render crash on any job with undefined totalSheep). v4.6.3d adds per-contractor boot-time access password (hash stored in contractor_settings.access_password_hash, verified flag in localStorage = hash itself for auto-invalidation on rotation, master PIN bypass for SRD support, null hash = no gate for graceful rollout). v4.6.3c-final adds mode badges next to crew names in pay summary + grand-total math check line in CONTRACTOR TOTALS. v4.6.3c adds c/kg presser mode (pressMode toggle + kg tracking via new tally_entries kind='bale_kg') and c/km travel mode (per-person day vs km, with override) — additive. v4.6.3b adds cascade delete from tally_entries on delRun/delMob — fixes zombie runs resurrecting via self-heal (Knights, 28 May). v4.6.3a added MOB TOTALS section to pay summary - additive only, no data model change from v4.6.3. v4.6.3 closes the data-loss
+const APP_VERSION='v4.6.3g'; /* v4.6.3g RESILIENCE (16 Jun, from Darby/Chloe stuck-queue incident): (1) periodic 20s background drain — browser 'online' event doesn't fire when a flaky connection silently recovers, so queued cells could sit unflushed until manual reopen; timer retries whenever online+fresh+queue non-empty (no-op when empty). (2) poison-pill quarantine — flushTallyQueue now separates PERMANENT rejections (constraint/validation, will never succeed) from TRANSIENT (timeout/network); permanent rows move to LS_TALLY_DEAD instead of pinning the queue + banner forever. (3) dead-letter replay on boot — quarantined cells get one retry per launch, so a since-fixed server blocker (e.g. the 'mess' kind constraint widened 15 Jun) self-recovers without re-entry. (4) sundries load resilient to missing table — sets a session flag on first 'table not found' and stops re-querying, ending per-load error spam when the migration hasn't run. NOTE: the tally_entries kind_check constraint MUST include every kind the build writes (count,shed_runs,bales,bale_kg,travel,mess) and sundries_entries MUST exist BEFORE deploy — both are hard prerequisites. v4.6.3f FEATURES (builds on v4.6.3e — deploy ONLY after 3e soak is clean): (1) MESS RATE — per-person $/day deduction; 3-state per-day toggle on Tally tab (Off ◯ / Half ½ / Full ●) stored as tally_entries kind='mess' multiplier 0/0.5/1 with run_id=mob_id=''; rate = crewDetails[id].messRate override else role default $35 shearer/crutcher $10 staff (resolveMessRate); Admin tab Mess Rate section; pay summary line 'Mess: N full + M half x $R/day = -$T'. (2) SUNDRIES — itemised per-person deductions in NEW sundries_entries table (run schema SQL BEFORE deploying this file); lead adds, admin edits/deletes via Summary-tab panel; pay summary itemises with subtotal. Both deduct POST-tax: GROSS → tax → mess → sundries → NET TOTAL. CONTRACTOR TOTALS gains conditional deduction lines + NET JOB TOTAL; math check extends through net when deductions exist. REGRESSION GUARANTEE: jobs with zero mess + zero sundries produce byte-identical pay output to v4.6.3e. calcPeriodStats now returns {shorn,totalEarn,messDeduction,sundriesDeduction,netEarn} — totalEarn stays gross. v4.6.3e SAFETY RELEASE (6 Jun 2026, after Knights/Bywong double incident): (1) delRun/delMob cascade deletes now scoped to cell_date=viewDate — run_id-only delete destroyed same-run cells on OTHER dates; (2) dbLoad merge now consults LS_TALLY_QUEUE as well as LS_QUEUE — a day of offline cells + silently-failed flush previously let the server's empty hydration overwrite the local day ("worked all day, lost it at night"); because flushTallyQueue retains only failed rows, post-flush queue state doubles as the flush-success gate; (3) jobDates guarantees today (Active jobs) and every date with existing data appear in the strip regardless of includeWeekends — weekend work was silently landing on the last visible weekday via defDate fallback; (4) new tappable banner when online+fresh but queued entries remain ("N entries not yet on server — tap to retry. Don't clear app data") — closes the silent state that drove users to clear site data and destroy the only copy. NO pay calc changes. v4.6.3d.1b CALC HOTFIX: Presser pay calc was iterating only shedTallies dates, which meant days where the presser pressed bales (or kg) WITHOUT entering shed_runs were skipped entirely from pay calculation. Real money bug — e.g. Whitey on Burragundy had 19 bales on Jun 2 with no shed_runs that day, calc never visited Jun 2 → $269.80 missing from his pay. Fix iterates union of shedTallies, baleTallies, baleWeights date keys so all days with any presser activity are evaluated. Applied to both calcPeriodStats (totals) and generateSummary (pay breakdown). All-runs and all-bales cases unchanged. v4.6.3d.1a hotfix: Presser hybrid-day pay summary display fix — when a presser had BOTH per-bale days AND per-run days in the same job, the displayed breakdown used totalRuns/totalBales summed across all days, producing math that didn't add up (e.g. "23 bales @ $14.20 = $213" when only 15 bales were actually paid per-bale and the other 8 were on a per-run day). Total earn was always correct; only the readable breakdown was wrong. Fix tracks paidRuns/paidBales separately so the line items match the math. All-bale and all-run cases unchanged. v4.6.3d.1 hotfix: (1) Map link handles goo.gl/Maps URLs as addresses by detecting http(s):// and passing through instead of wrapping in maps.google.com search query; (2) Defensive guard on job.baleWeights access in cpk-mode pay calc (was a crash hazard on old jobs without the field if pressMode was toggled to cpk); (3) Guard all 7 unguarded job.totalSheep.toLocaleString() crash sites with ||0 (was a render crash on any job with undefined totalSheep). v4.6.3d adds per-contractor boot-time access password (hash stored in contractor_settings.access_password_hash, verified flag in localStorage = hash itself for auto-invalidation on rotation, master PIN bypass for SRD support, null hash = no gate for graceful rollout). v4.6.3c-final adds mode badges next to crew names in pay summary + grand-total math check line in CONTRACTOR TOTALS. v4.6.3c adds c/kg presser mode (pressMode toggle + kg tracking via new tally_entries kind='bale_kg') and c/km travel mode (per-person day vs km, with override) — additive. v4.6.3b adds cascade delete from tally_entries on delRun/delMob — fixes zombie runs resurrecting via self-heal (Knights, 28 May). v4.6.3a added MOB TOTALS section to pay summary - additive only, no data model change from v4.6.3. v4.6.3 closes the data-loss
   vectors that survived v4.6.2. The Woolaway incident on 21 May 2026 showed
   three structural gaps even after v4.6.2:
 
@@ -750,16 +751,36 @@ async function flushTallyQueue(){
   const failed=[];
   for(const row of q){
     try{
+      /* v4.6.3g — strip internal bookkeeping field before sending to DB */
+      const {_dead_tries,...dbRow}=row;
       const result=await withTimeout(
-        sb.from('tally_entries').upsert(row,{
+        sb.from('tally_entries').upsert(dbRow,{
           onConflict:'contractor_slug,job_id,cell_date,kind,run_id,mob_id,crew_id'
         }),
         5000,
         'tally_flush_timeout'
       );
       if(result&&result.error){
-        failed.push(row);
-        logSaveFailure('error','tally_flush:'+row.job_id+':'+row.kind,result.error.message);
+        /* v4.6.3g — distinguish PERMANENT rejections (constraint/validation —
+           will never succeed on retry) from TRANSIENT ones (timeout/network).
+           A permanent failure is quarantined to LS_TALLY_DEAD instead of being
+           re-queued forever, so one bad row can't pin the queue and strand the
+           banner (Darby mess-kind constraint case, 15 Jun). Transient failures
+           re-queue and the background drain retries them. */
+        const msg=result.error.message||'';
+        if(/violates check constraint|invalid input|column .* does not exist|violates not-null/i.test(msg)){
+          /* v4.6.3g — carry _dead_tries through the requeue→reflush→requarantine
+             cycle so the boot-replay cap (3) actually holds for a genuinely-bad
+             row instead of resetting each round. */
+          const tries=row._dead_tries||0;
+          const cleanRow={...row};delete cleanRow._dead_tries;
+          const dead=lsGet(LS_TALLY_DEAD)||[];dead.push({row:cleanRow,err:msg,at:new Date().toISOString(),tries});lsSet(LS_TALLY_DEAD,dead);
+          logSaveFailure('error','tally_flush_quarantined:'+row.job_id+':'+row.kind,msg);
+        }else{
+          const cleanRow={...row};delete cleanRow._dead_tries;
+          failed.push(cleanRow);
+          logSaveFailure('error','tally_flush:'+row.job_id+':'+row.kind,msg);
+        }
       }else{
         flushed++;
       }
@@ -1055,13 +1076,24 @@ function buildStrippedJobBlob(job){
 }
 
 /* ── v4.6.3f SUNDRIES (itemised per-person deductions, own table) ── */
+/* v4.6.3g — session flag: once we learn the table is absent (migration not yet
+   run on this contractor), stop re-querying it every load. Avoids the per-load
+   error spam seen on Darby and a pointless round-trip. Reset on full reload. */
+let _sundriesTableMissing=false;
 async function loadSundriesForJob(jobId){
+  if(_sundriesTableMissing)return [];
   try{
     const r=await withTimeout(sb.from('sundries_entries')
       .select('id,crew_id,occurred_date,description,amount,updated_at')
       .eq('contractor_slug',CONTRACTOR_SLUG)
       .eq('job_id',jobId).order('occurred_date',{ascending:true}),5000,'sundries_load_timeout');
-    if(r&&r.error){logSaveFailure('error','sundries_load',r.error.message);return null;}
+    if(r&&r.error){
+      const m=r.error.message||'';
+      if(/sundries_entries/i.test(m)&&/schema cache|does not exist|not find/i.test(m)){
+        if(!_sundriesTableMissing){_sundriesTableMissing=true;logSaveFailure('error','sundries_table_missing','migration_not_run');}
+      }else{logSaveFailure('error','sundries_load',m);}
+      return null;
+    }
     return (r.data||[]);
   }catch(e){logSaveFailure(e.message==='sundries_load_timeout'?'timeout':'error','sundries_load',e.message);return null;}
 }
@@ -4895,6 +4927,31 @@ function App(){
             as normal; next successful online session will trigger the wipe.
        This is a one-time event per device per DATA_VERSION change. */
     const proceedWithLoad=()=>{
+      /* v4.6.3g — dead-letter replay. On boot, move any quarantined cells back
+         into the live queue for one more attempt. If the server-side blocker
+         that quarantined them has since been fixed (e.g. the missing 'mess'
+         kind constraint, widened 15 Jun), they flush cleanly now; if it's
+         still broken they quarantine again on the same pass. This is what lets
+         a fixed-server-side issue self-recover without the user re-entering. */
+      const dead=lsGet(LS_TALLY_DEAD)||[];
+      if(dead.length>0){
+        const q=lsGet(LS_TALLY_QUEUE)||[];
+        const stillDead=[];
+        dead.forEach(d=>{
+          if(!d||!d.row){return;}
+          /* v4.6.3g — replay up to 3 times. A since-fixed server blocker (the
+             common case) clears on the first replay. A genuinely malformed row
+             stops cycling after 3 attempts but is PRESERVED in dead-letter for
+             inspection — never silently dropped. */
+          const tries=(d.tries||0)+1;
+          if(tries<=3){q.push({...d.row,_dead_tries:tries});}
+          else{stillDead.push({...d,tries,giveUp:true});}
+        });
+        lsSet(LS_TALLY_QUEUE,q);
+        if(stillDead.length>0){lsSet(LS_TALLY_DEAD,stillDead);logSaveFailure('error','dead_letter_giveup','count='+stillDead.length);}
+        else{lsRemove(LS_TALLY_DEAD);}
+        logSaveFailure('diag_save','dead_letter_replay','replayed='+(dead.length-stillDead.length)+';held='+stillDead.length);
+      }
       const pendingTally=lsGet(LS_TALLY_QUEUE)||[];
       if((pendingOnMount.length>0||pendingTally.length>0)&&navigator.onLine){
         Promise.all([flushQueue().catch(()=>0),flushTallyQueue().catch(()=>0)])
@@ -5048,6 +5105,43 @@ function App(){
     window.addEventListener('online',goOnline);
     window.addEventListener('offline',goOffline);
     return()=>{window.removeEventListener('online',goOnline);window.removeEventListener('offline',goOffline);};
+  },[]);
+
+  /* v4.6.3g — periodic background drain. The browser 'online' event only fires
+     on a true offline→online transition. A connection that degrades to flaky
+     (requests time out) and then silently recovers never fires 'online', so a
+     queued cell could sit unflushed until the next manual reopen — exactly the
+     Darby/Chloe case (banner stuck while signal was fine). This timer attempts
+     a drain every 20s whenever we're online, fresh, and the queue is non-empty.
+     Cheap (no-op when queue empty), and the only thing that makes the queue
+     self-healing without user action. */
+  useEffect(()=>{
+    let running=false; /* v4.6.3g — re-entrancy guard: never let a slow flush overlap the next tick */
+    const tick=async()=>{
+      if(running)return;
+      if(!navigator.onLine||!isFreshRef.current)return;
+      /* Only drain the per-CELL tally queue here. The whole-job queue (LS_QUEUE)
+         pushes a stripped job BLOB, and a background push of a stale blob is the
+         cross-device structure-overwrite hazard from the 6 Jun Bywong incident.
+         Whole-job flush stays on the explicit goOnline/boot paths where freshness
+         is already reconciled. Tally cells are per-cell last-write-wins and safe. */
+      const qLen=(lsGet(LS_TALLY_QUEUE)||[]).length;
+      if(qLen===0)return;
+      running=true;
+      try{
+        const before=qLen;
+        const nt=await flushTallyQueue().catch(()=>0);
+        const after=(lsGet(LS_TALLY_QUEUE)||[]).length;
+        const pend=after+(lsGet(LS_QUEUE)||[]).length;
+        setPendingCount(pend);
+        if(after<before){
+          logSaveFailure('diag_save','bg_drain','flushed='+nt+';tally_remaining='+after);
+          if(pend===0){setSaveStatus('saved');setTimeout(()=>setSaveStatus(s=>s==='saved'?'':s),2500);}
+        }
+      }finally{running=false;}
+    };
+    const id=setInterval(tick,20000);
+    return()=>clearInterval(id);
   },[]);
 
   /* Keep jobsRef in sync so async handlers can read current state synchronously */
