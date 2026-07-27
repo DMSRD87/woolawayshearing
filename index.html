@@ -28,6 +28,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--b);min-height
 .role-toggle{display:flex;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:8px;overflow:hidden;flex-shrink:0}
 .rt-btn{padding:5px 8px;font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;cursor:pointer;border:none;background:none;color:rgba(255,255,255,.5);transition:.15s;white-space:nowrap}
 .rt-btn.active{background:var(--amber);color:#000}
+.rt-ic{margin-right:4px}
 .sched-btn{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:6px 10px;color:rgba(255,255,255,.85);font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;transition:.12s}
 .sched-btn:active{background:rgba(255,255,255,.22)}
 .sched-btn-ic{font-size:15px;line-height:1}
@@ -55,7 +56,26 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--b);min-height
 .pmb-sub{font-size:12px;color:rgba(255,255,255,.4);margin-bottom:24px;text-align:center}
 .fab{position:fixed;bottom:22px;right:calc(50% - 466px);width:52px;height:52px;border-radius:50%;background:var(--amber);border:none;cursor:pointer;font-size:26px;color:#000;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 24px rgba(245,158,11,.4);z-index:40;transition:transform .15s}
 .fab:active{transform:scale(.91)}
-@media(max-width:960px){.fab{right:18px}}
+@media(max-width:960px){.fab{right:18px}
+  /* v4.6.11i: inside the admin quick-action column the FAB must stack, not float -
+     fixed positioning made it sit on top of the My Database pill in this corner */
+  .fab-stack .fab{position:static}
+}
+/* v4.6.11g mobile layout pass - phones only, desktop untouched */
+@media(max-width:520px){
+  html,body{overflow-x:hidden}
+  .topbar{padding:0 10px;gap:6px}
+  .rt-ic{display:none}
+  .rt-btn{padding:6px 7px;font-size:10px}
+  .back-label{max-width:70px}
+  .sched-lbl{display:none}
+  .sched-btn{padding:6px 9px}
+  .logo{font-size:20px}
+  .sched-btn{padding:6px 8px;font-size:12px}
+  .sms-row{gap:8px}
+  .sms-l{min-width:0;flex:1}
+  .sms-name,.sms-ph,.sms-role{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
 /* WEEK BANNER */
 .week-banner{margin:16px 16px 0;padding:18px;background:linear-gradient(135deg,rgba(245,158,11,.12),rgba(245,158,11,.04));border:1px solid rgba(245,158,11,.3);border-radius:var(--r)}
 .wb-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
@@ -534,8 +554,14 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.11f';
+const APP_VERSION='v4.6.12a';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
+/* v4.6.12a (26 Jul 2026): fleet-alignment rebuild - feature content identical to v4.6.12; new version string per one-build-one-version discipline. */
+/* v4.6.12 (20 Jul 2026): PER-CREW PIN, contractor-controlled (design settled with the founder before any deploy; an earlier worker-self-set draft was discarded - self-set has a bootstrap race where an imposter claims a name first and sets its PIN). MODEL: every worker is AUTO-ASSIGNED a random 4-digit PIN (genCrewPin at creation; existing crew backfilled via SQL per contractor at rollout). The PIN is stored READABLE at crew_members.data.pin and shown on the worker's card in My Database (admin-only surface) with a regenerate button and a 'Text PIN' button (plain GSM-7 SMS via /api/send-sms so the worker has it on file). DELIBERATE ENGINEERING CALL, not an oversight: with the shared anon key and a 4-digit space, a hash is brute-forced in under a second by anyone determined, so hashing here is theatre; readable storage buys contractor look-up-ability at no real security cost. This is a visibility gate against casual wrong-name claims - real authentication is v5 (Supabase Auth + RLS). CLAIM FLOW: picking a name with a PIN demands it (CrewPinVerifyModal, direct compare, works offline once the record is synced; names with PINs show a lock in the picker); 'Not you?' re-challenges; app_settings.requireCrewPin=true blocks claiming names with NO pin ('ask your contractor') for hard-lockdown contractors, off = pinless names bind as before. Workers never set or change their own PIN; contractor regenerates on request (specific chosen PINs = SRD via SQL). Lead/Admin PINs and the per-job PIN untouched. */
+/* v4.6.11j (20 Jul 2026): (1) PAY WEEK PAYDAY - now prefers contractor_settings.default_rates payDayOfWeek/payFrequency (durable, admin-set, boot-cached to LS_DEFAULT_RATES) over the latest-job rule. DB evidence 20 Jul: two contractors who deliberately picked Saturday (payday 6) had every subsequent job seeded payday 4 from stale pre-4.6.6 device templates (4 = old-picker 'Friday', post-fix Thursday), and the v4.6.9 latest-job rule adopted it -> Pay Week flipped to Thu-Wed periods ('reset from Saturday to Wednesday'). default_rates is the template devices can't overwrite; latest-job then device template remain the fallbacks, so contractors without default_rates behave exactly as before. NO period-maths change. (2) CREW CHIP DISAMBIGUATION - job-creation/crew-edit chips showed first name only; two same-first-name workers were identical chips. chipLabel adds a surname initial ONLY when first names clash in the group, full surname when initials clash too, phone last-3 when names are entirely identical. Unambiguous names render exactly as before. (3) QUICK-ACTION ORDER - + FAB moved to the top of the bottom-right admin stack (then Pay Week, then My Database) per field preference. (4) STAFF ROLE TOTALS - pay summary gains a role-combined block after per-worker staff lines (e.g. 'Wool Handlers (2): 16 runs - $1,360.00'); Pay Week report WEEK TOTALS gains role-combined wages. Roles with nothing to show are omitted. DISPLAY-ONLY: new lines assembled from already-computed per-worker figures; no pay calculation, superable base, tax, or totals maths touched; jobs whose reports are never re-generated are unaffected. */
+/* v4.6.11i (19 Jul 2026, field feedback on 11h): (1) BOTTOM-RIGHT STACK FIXED - the admin Pay Week / My Database pills render in a fixed flex column at bottom-right, but the + FAB inside that same column is position:fixed, so it escapes the stack; on <=960px its right:18 lands in the pills' corner and the circle sits ON TOP of My Database (desktop unaffected because the FAB's right:calc(50% - 466px) parks it at the content edge, away from the pills - which is why laptop looked fine). Fix: .fab-stack .fab{position:static} at <=960px so all three stack cleanly with the column's gap. (2) HOME TOPBAR WIDTH - admin mode on Home is logo + Schedule + lock + four role buttons; ADMIN clipped off the right edge even with 11h text-only roles. On phones the Schedule label hides (icon-only, .sched-lbl span) and the logo drops to 20px - that recovers the width the role bar needs. Lock button kept: it's lockRole (drops the device back to view-only so an elevated session doesn't ride along when the phone is handed over). Desktop byte-identical rendering. */
+/* v4.6.11h (15 Jul 2026): mobile role buttons TEXT-ONLY, not emoji-only - field feedback on 11g was that bare emoji (clipboard vs key) are meaningless to crew seeing them cold. On phones the emoji hides and the small-caps label shows: VIEW FARMER LEAD ADMIN. Text-only is narrower than the emoji+label combo that caused the original overflow, so the topbar still fits with all four buttons + back + schedule on a ~412px viewport (back-label capped 70px for small-phone headroom). Desktop unchanged: emoji + label as always. */
+/* v4.6.11g (15 Jul 2026): MOBILE LAYOUT PASS - phone viewports were forced into horizontal scroll (users zooming out to see the whole interface). Root cause: the topbar role-toggle is flex-shrink:0 with four nowrap buttons; with a farmer on the job its natural width plus the 160px back-label exceeds a ~412px viewport, so the page itself scrolls sideways and every fixed/sheet element looks clipped (send-modal buttons at the right edge etc). Desktop untouched - all changes ride inside @media(max-width:520px): role buttons collapse to emoji-only (labels in .rt-lbl spans, hidden on phones; active state stays amber), tighter topbar padding/gap, back-label capped 90px, body overflow-x hidden (safe: all intentionally-wide content - tally grids, tabs, date strips, week scroll, summaries - already lives in its own overflow-x:auto container), and sms-row left column gets min-width:0 + ellipsis so long names shrink instead of pushing Preview/Send off-screen. */
 /* v4.6.11f (15 Jul 2026, shed-visit follow-up, built on the DEPLOYED 11e codebase): two fixes with DB-proven mechanisms. (1) QUERY-STRING DEEP LINKS - a crew Android did multiple clean full boots (pageshow persisted=false + fresh mountLoad) while its owner's SMS link was tapped, wrote NO job_views receipt, and logged ZERO deeplink/swallow errors: the boot handler ran and simply saw no hash, because Android strips the #fragment when handing a link to an installed PWA (and some SMS linkifiers end the tappable URL at '#'). An iPhone booting 30s later kept its fragment and receipted instantly. SMS builders now emit /?job=&crew= QUERY links - queries survive intent launches and linkifiers, and a query navigation into a warm instance is a FULL PAGE LOAD (unlike a hash change), so the boot handler covers warm-instance taps with no extra listener. Handler reads location.search first, falls back to location.hash so every previously-sent link keeps working; URL cleaned with history.replaceState (no reload, no history spam). HONEST SCOPE: legacy hash links tapped on fragment-stripping handsets still cannot receipt - the parameter never reaches the app; any 11f re-send fixes that person permanently. (2) FARMER NAME TRAP REMOVED - both farmer send paths required phone AND name; a real farm record with phone set but farmerName='' passed every UI check and then silently dropped the farmer from the bulk send AND hid the farmer row's Preview/Send buttons (tickbox on, phone showing, no SMS, no error, no buttons - the full field report 15 Jul). Both gates are now PHONE-ONLY; a blank name falls back to 'there' in the SMS greeting. */
 /* v4.6.11e (15 Jul 2026): (1) IN-FLIGHT TALLY FLUSH - closes the pocket-lock write gap (14 Jul, two contractor jobs, DB-proven): a per-cell tally write dispatched in the instant before the phone locks is frozen mid-flight by iOS - the fetch dies AND the 5s timeout timer freezes, so neither the success path nor the catch->queue path runs until the page resumes; the server holds the PREVIOUS keystroke's value (viewer on another device saw '3' of a '37') for the whole pocket period, and a BFCache restore that drops the promise makes the stale value permanent. Fix: TALLY_INFLIGHT map tracks every dispatched cell row; on visibilitychange->hidden / pagehide / beforeunload the rows are dumped SYNCHRONOUSLY into LS_TALLY_QUEUE (localStorage survives the freeze; existing 20s background drain + goOnline flush push them on resume) plus a best-effort keepalive REST upsert so the server usually gets the final value even while the phone stays pocketed. Idempotent by design - a cell may be upserted twice with the same value. HONEST SCOPE: keepalive is not guaranteed once iOS freezes the page; the guarantee is the queue (value can no longer be lost), the keepalive just shrinks the stale window from 'until device resumes' to usually-immediate. (2) FARMER SEND ROW - farmer gets his own row in Send Job Cards (avatar/name/phone/viewed receipt/Preview/Send) so a contractor can send or re-send the farmer link WITHOUT re-texting the whole crew; the 'Also send to farmer' tickbox stays for the bulk path. Preview reuses JobCardView (greeting is crew-gated, renders clean for farmer identity). Send requires farm record farmerName+farmerPhone - edit via the tickbox fields or Edit Farm. */
 /* v4.6.11d (12 Jul 2026): crew job-card SMS trimmed to a teaser (greeting + contractor + start date + link + do-not-reply). Full job detail now lives BEHIND the link only, so crew must OPEN it to see the job - which writes the green 'viewed' receipt on the Overview (the point of the trim, per contractor feedback). Also drops the crew card from 3 Twilio segments to 2 (clears the body-trim open thread). Contractor name used once to hold the 2-segment ceiling for long names. GSM-7 only. Broadcast send body was already hyphen/GSM-7 (only its on-screen preview carries em-dashes - cosmetic, not billed); left untouched. Carries forward the 4.6.11c farmer view-receipt. */
@@ -1993,6 +2019,7 @@ function generateSummary(job,period){
     if(taxPct>0||mz.amount>0||sz.amount>0)L.push('  NET TOTAL: $'+(gross-taxAmt-mz.amount-sz.amount).toFixed(2));
   });
   L.push('');L.push(dash);L.push('');L.push('SHED STAFF');L.push(dash);
+  const staffRoleTot={}; /* v4.6.11j - role-combined display totals, assembled from per-worker figures */
   shedIds.forEach(id=>{
     const c=gc(id);if(!c)return;
     const role=getJobRole(job,id);
@@ -2066,7 +2093,21 @@ function generateSummary(job,period){
     mz.lines.forEach(l=>L.push(l));
     sz.lines.forEach(l=>L.push(l));
     if(taxPct>0||mz.amount>0||sz.amount>0)L.push('  NET TOTAL: $'+(gross-taxAmt-mz.amount-sz.amount).toFixed(2));
+    /* v4.6.11j - accumulate role totals (earn = work wage excl travel, matching Superable) */
+    if(!staffRoleTot[role])staffRoleTot[role]={n:0,runs:0,wage:0};
+    staffRoleTot[role].n++;staffRoleTot[role].runs+=totalRuns;staffRoleTot[role].wage+=earn;
   });
+  /* v4.6.11j - STAFF ROLE TOTALS: combined per role, zero roles omitted. Display only. */
+  {
+    const srtKeys=Object.keys(staffRoleTot).filter(r=>staffRoleTot[r].wage>0.005||staffRoleTot[r].runs>0);
+    if(srtKeys.length>0){
+      L.push('');L.push('STAFF ROLE TOTALS');
+      srtKeys.forEach(r=>{
+        const t=staffRoleTot[r];
+        L.push('  '+r+'s ('+t.n+'): '+(t.runs>0?t.runs+' runs \u2014 ':'')+'$'+t.wage.toFixed(2)+' wages');
+      });
+    }
+  }
   const totalShorn=shIds.reduce((s,id)=>s+(shornBy[id].sh+shornBy[id].cr),0);
   const jobTotal=totalShEarn+totalTeamLoad+totalShedEarn+totalTravel+totalStand;
   /* MOB TOTALS - grower-invoice view, base rates only. Loadings shown as a separate line. */
@@ -2308,6 +2349,14 @@ function generatePayWeekReport(jobs,period,contractorName){
   workers.forEach(w=>{const g=w.piece+w.teamLoad+w.staffEarn+w.travel+w.stand;tg+=g;ts+=w.piece+w.teamLoad+w.staffEarn+w.standSuper;tt+=w.tax;tm+=w.mess;tsu+=w.sundries;});
   L.push(dash);L.push('WEEK TOTALS');L.push(dash);
   L.push('Workers: '+workers.length+'   Sheds: '+(sheds.join(', ')||'none'));
+  /* v4.6.11j - role-combined staff wages across the period (staffEarn = work wage,
+     travel/stand excluded, matching the per-worker Superable basis). Zero roles omitted. */
+  {
+    const rt={};
+    workers.forEach(w=>{if(isSh(w))return;if(w.staffEarn<=0.005)return;if(!rt[w.role])rt[w.role]={n:0,wage:0};rt[w.role].n++;rt[w.role].wage+=w.staffEarn;});
+    const rk=Object.keys(rt);
+    if(rk.length){L.push('');L.push('STAFF ROLE TOTALS');rk.forEach(r=>{L.push('  '+r+'s ('+rt[r].n+'): $'+rt[r].wage.toFixed(2)+' wages');});}
+  }
   L.push('Gross: $'+tg.toFixed(2)+'   Superable: $'+ts.toFixed(2)+'   Super ('+(SUPER_RATE*100).toFixed(0)+'%): $'+(ts*SUPER_RATE).toFixed(2));
   L.push('Tax: -$'+tt.toFixed(2)+'   Mess: -$'+tm.toFixed(2)+'   Sundries: -$'+tsu.toFixed(2)+'   NET: $'+(tg-tt-tm-tsu).toFixed(2));
   if(checks.length){
@@ -2335,6 +2384,86 @@ function generatePayWeekCSV(jobs,period){
     [['GROSS',gross],['SUPERABLE',superable],['SUPER',superable*SUPER_RATE],['TAX',-p.tax],['MESS',-p.mess],['SUNDRIES',-p.sundries],['NET',gross-p.tax-p.mess-p.sundries]].forEach(kv=>rows.push([p.name,p.role,'','',kv[0],'','',kv[1].toFixed(2),'']));
   });
   return rows.map(r=>r.map(esc).join(',')).join('\n');
+}
+/* v4.6.12 - crew PIN helpers */
+function genCrewPin(){return String(Math.floor(Math.random()*10000)).padStart(4,'0');}
+
+/* v4.6.12 - verify-only PIN modal for identity claiming. Direct compare against the
+   synced readable pin (see header for why not hashed). Offline-capable. */
+function CrewPinVerifyModal({claim,onBound,onCancel}){
+  const [val,setVal]=useState('');
+  const [err,setErr]=useState('');
+  const submit=()=>{
+    if(val.length!==4){setErr('PIN is 4 digits');return;}
+    if(val===String(claim.pin)){onBound();}
+    else{setErr('Wrong PIN');setVal('');}
+  };
+  return e('div',{className:'pin-modal'},e('div',{className:'pin-modal-box'},
+    e('div',{style:{fontWeight:800,fontSize:16,marginBottom:4}},claim.name),
+    e('div',{style:{color:'var(--muted)',fontSize:13,marginBottom:12}},'Enter your 4-digit PIN. Forgotten it? Your contractor can look it up.'),
+    e('input',{type:'text',inputMode:'numeric',maxLength:4,autoFocus:true,value:val,
+      onChange:ev=>{setVal(ev.target.value.replace(/\D/g,'').slice(0,4));setErr('');},
+      onKeyDown:ev=>{if(ev.key==='Enter')submit();},
+      style:{width:'100%',fontSize:24,letterSpacing:12,textAlign:'center',padding:'10px',background:'var(--card2)',border:'1px solid var(--border)',borderRadius:10,color:'inherit',marginBottom:10,boxSizing:'border-box'}}),
+    err&&e('div',{style:{color:'var(--red)',fontSize:13,marginBottom:8,fontWeight:600}},err),
+    e('div',{style:{display:'flex',gap:8}},
+      e('button',{onClick:onCancel,style:{flex:1,padding:'10px',borderRadius:10,border:'1px solid var(--border)',background:'var(--card)',color:'inherit',fontWeight:700,cursor:'pointer'}},'Cancel'),
+      e('button',{onClick:submit,disabled:val.length!==4,style:{flex:1,padding:'10px',borderRadius:10,border:'none',background:'var(--amber)',color:'#000',fontWeight:800,cursor:'pointer',opacity:val.length!==4?.5:1}},'OK')
+    )
+  ));
+}
+
+/* v4.6.12 - PIN row on the My Database worker card (admin-only surface): shows the PIN,
+   regenerate with confirm, Text PIN via /api/send-sms. SMS body is GSM-7 plain - no emoji,
+   no em-dash (UCS-2 multiplies segment billing). */
+function CrewPinRow({c,onSave}){
+  const [confirmRegen,setConfirmRegen]=useState(false);
+  const [smsState,setSmsState]=useState('');
+  const doRegen=()=>{onSave(Object.assign({},c,{pin:genCrewPin()}));setConfirmRegen(false);};
+  const doText=async()=>{
+    if(!c.phone||!c.pin)return;
+    setSmsState('sending');
+    try{
+      const r=await fetch('/api/send-sms',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({messages:[{to:c.phone,body:'Your myGang PIN for '+CONTRACTOR_NAME+' is '+c.pin+'. You need it when picking your name in the app. Keep this message.'}]})});
+      setSmsState(r.ok?'sent':'failed');
+    }catch(e2){setSmsState('failed');}
+  };
+  return e('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:6,flexWrap:'wrap'}},
+    e('span',{style:{fontSize:12,color:'var(--muted)'}},'App PIN:'),
+    e('span',{style:{fontFamily:'var(--m)',fontWeight:800,fontSize:14,letterSpacing:2,color:'var(--amber)'}},c.pin||'\u2014'),
+    confirmRegen
+      ?e('span',{style:{display:'inline-flex',gap:6,alignItems:'center'}},
+          e('span',{style:{fontSize:11,color:'#ef4444',fontWeight:600}},'New PIN?'),
+          e('button',{onClick:doRegen,style:{background:'#ef4444',border:'none',borderRadius:6,padding:'3px 8px',color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}},'Yes'),
+          e('button',{onClick:()=>setConfirmRegen(false),style:{background:'var(--card2)',border:'1px solid var(--border)',borderRadius:6,padding:'3px 8px',color:'var(--text)',fontWeight:700,fontSize:11,cursor:'pointer'}},'No'))
+      :e('button',{onClick:()=>setConfirmRegen(true),style:{background:'var(--card2)',border:'1px solid var(--border)',borderRadius:6,padding:'3px 8px',color:'var(--muted)',fontWeight:700,fontSize:11,cursor:'pointer'}},'\u21bb New'),
+    c.phone&&c.pin&&e('button',{onClick:doText,disabled:smsState==='sending'||smsState==='sent',
+      style:{background:smsState==='sent'?'rgba(34,197,94,.15)':'rgba(245,158,11,.15)',border:'1px solid '+(smsState==='sent'?'rgba(34,197,94,.3)':'rgba(245,158,11,.3)'),borderRadius:6,padding:'3px 8px',color:smsState==='sent'?'var(--green)':'var(--amber)',fontWeight:700,fontSize:11,cursor:'pointer'}},
+      smsState==='sent'?'\u2713 Texted':smsState==='sending'?'\u2026':smsState==='failed'?'Retry text':'\ud83d\udcf1 Text PIN')
+  );
+}
+
+/* v4.6.11j - crew chip disambiguation. First-name-only chips made same-first-name workers
+   indistinguishable at job creation. Escalates only as needed: unique first name -> unchanged;
+   first-name clash -> surname initial; initial clash too -> full surname; entirely identical
+   or single-word names -> phone last 3. */
+function chipLabel(c,members){
+  const first=(c.name||'').split(' ')[0];
+  const fl=first.toLowerCase();
+  const clash=members.filter(m=>((m.name||'').split(' ')[0]||'').toLowerCase()===fl).length>1;
+  if(!clash)return first;
+  const parts=(c.name||'').split(' ');
+  const sur=parts.slice(1).join(' ');
+  if(sur){
+    const myIni=sur.charAt(0).toLowerCase();
+    const iniClash=members.filter(m=>{
+      const p=(m.name||'').split(' ');
+      return (p[0]||'').toLowerCase()===fl&&(p.slice(1).join(' ').charAt(0)||'').toLowerCase()===myIni;
+    }).length>1;
+    return first+' '+(iniClash?sur:sur.charAt(0)+'.');
+  }
+  return first+(c.phone?' \u00b7'+String(c.phone).slice(-3):'');
 }
 /* v4.6.10 - job number suggestion: FARM prefix + per-contractor sequence. Legacy 6-digit numbers
    (no '-NNNN' tail) are ignored, so the first new-format job is PREF-0001. */
@@ -2710,9 +2839,9 @@ function TopBar({role,setRole,onBack,backLabel,onSchedule}){
     e('div',{className:'topbar'},
       onBack?e('button',{className:'back-btn',onClick:onBack},e('span',{className:'back-arr'},'←'),e('span',{className:'back-label'},backLabel||'Back')):e('div',{className:'logo'},'my',e('em',null,'Gang')),
       e('div',{style:{display:'flex',alignItems:'center',gap:6}},
-        onSchedule&&role!=='read_only'&&role!=='farmer'&&e('button',{className:'sched-btn',onClick:onSchedule,title:'Schedule'},e('span',{className:'sched-btn-ic'},'📅'),e('span',null,'Schedule')),
+        onSchedule&&role!=='read_only'&&role!=='farmer'&&e('button',{className:'sched-btn',onClick:onSchedule,title:'Schedule'},e('span',{className:'sched-btn-ic'},'📅'),e('span',{className:'sched-lbl'},'Schedule')),
         role!=='read_only'&&e('button',{onClick:lockRole,title:'Lock',style:{background:'rgba(255,255,255,.1)',border:'none',borderRadius:6,padding:'4px 8px',color:'rgba(255,255,255,.5)',fontSize:14,cursor:'pointer'}},'🔒'),
-        e('div',{className:'role-toggle'},[['👁','View','read_only'],...(farmerFarms.length?[['🌾','Farmer','farmer']]:[]),['📋','Lead','shed_lead'],['🔑','Admin','admin']].map(([ic,lbl,rv])=>e('button',{key:rv,className:`rt-btn${role===rv?' active':''}`,onClick:()=>requestRole(rv)},`${ic} ${lbl}`)))
+        e('div',{className:'role-toggle'},[['👁','View','read_only'],...(farmerFarms.length?[['🌾','Farmer','farmer']]:[]),['📋','Lead','shed_lead'],['🔑','Admin','admin']].map(([ic,lbl,rv])=>e('button',{key:rv,className:`rt-btn${role===rv?' active':''}`,onClick:()=>requestRole(rv)},e('span',{className:'rt-ic'},ic),e('span',{className:'rt-lbl'},lbl))))
       )
     ),
     showPin==='farmer'&&e('div',{className:'pin-modal'},
@@ -4844,7 +4973,7 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew,jobs}){
             e('div',{className:'crew-group-lbl'},r+'s'),
             e('div',{className:'chip-wrap'},
               members.map(c=>e('div',{key:c.id,className:`chip${selCrew.includes(c.id)?' sel':''}`,onClick:()=>tog(c.id)},
-                c.name.split(' ')[0]+(c.hasVehicle?' 🚗':'')
+                chipLabel(c,members)+(c.hasVehicle?' 🚗':'')
               ))
             )
           )),
@@ -5003,7 +5132,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
             e('div',{className:'crew-group-lbl'},r+'s'),
             e('div',{className:'chip-wrap'},
               members.map(c=>e('div',{key:c.id,className:`chip${selCrew.includes(c.id)?' sel':''}`,onClick:()=>tog(c.id)},
-                c.name.split(' ')[0]+(c.hasVehicle?' 🚗':'')
+                chipLabel(c,members)+(c.hasVehicle?' 🚗':'')
               ))
             )
           )),
@@ -5045,6 +5174,8 @@ function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,onSchedule,contrac
   }catch(err){}})();return()=>{alive=false;};},[]);
   /* v4.6.10 - crew identity (read_only devices): visibility filter, not authentication */
   const [myId,setMyId]=useState(lsGet(LS_MY_ID)||null);
+  const [pinClaim,setPinClaim]=useState(null); /* v4.6.12 */
+  const [pinErr,setPinErr]=useState('');
   const [crewSearch,setCrewSearch]=useState('');
 
   const jobName=j=>{const f=gf(j.farmId);return j.jobName||(f?f.name:'Unknown');};
@@ -5112,8 +5243,16 @@ function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,onSchedule,contrac
         e('div',{style:{fontFamily:'var(--h)',fontSize:20,fontWeight:800,margin:'8px 0 4px'}},'Who are you?'),
         e('div',{style:{color:'var(--muted)',fontSize:13,marginBottom:12}},'Pick your name to see your jobs. Leads and admins: use the role switch top-right.'),
         e('input',{type:'text',placeholder:'Search name…',value:crewSearch,onChange:ev=>setCrewSearch(ev.target.value),className:'fi',style:{marginBottom:10}}),
+        pinErr&&e('div',{style:{color:'var(--red)',fontSize:13,fontWeight:600,marginBottom:8}},pinErr),
         (CREW||[]).filter(c=>!crewSearch.trim()||(c.name||'').toLowerCase().includes(crewSearch.trim().toLowerCase())).map(c=>
-          e('button',{key:c.id,onClick:()=>{lsSet(LS_MY_ID,c.id);setMyId(c.id);},style:{display:'block',width:'100%',textAlign:'left',background:'var(--card)',border:'1px solid var(--border)',borderRadius:10,padding:'12px 14px',color:'inherit',fontWeight:700,marginBottom:8,cursor:'pointer'}},c.name,e('span',{style:{color:'var(--muted)',fontWeight:400,marginLeft:8,fontSize:12}},c.role||''))
+          e('button',{key:c.id,onClick:()=>{
+            /* v4.6.12 - PIN gate: a name with a PIN always challenges; requireCrewPin
+               blocks pinless names entirely; neither -> bind as v4.6.10. */
+            setPinErr('');
+            if(c.pin)setPinClaim(c);
+            else if((lsGet(LS_APP_SETTINGS)||{}).requireCrewPin===true)setPinErr('No PIN set for '+c.name+' yet. Ask your contractor.');
+            else{lsSet(LS_MY_ID,c.id);setMyId(c.id);}
+          },style:{display:'block',width:'100%',textAlign:'left',background:'var(--card)',border:'1px solid var(--border)',borderRadius:10,padding:'12px 14px',color:'inherit',fontWeight:700,marginBottom:8,cursor:'pointer'}},c.name,c.pin&&e('span',{style:{marginLeft:6,fontSize:11,opacity:.6}},'\ud83d\udd12'),e('span',{style:{color:'var(--muted)',fontWeight:400,marginLeft:8,fontSize:12}},c.role||''))
         )
       ):(function(){
         const me=(CREW||[]).find(c=>c.id===myId);
@@ -5128,7 +5267,11 @@ function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,onSchedule,contrac
           mine.length===0?e('div',{style:{textAlign:'center',color:'var(--muted)',padding:'40px 0'}},'No jobs on your board for this window.'):
           mine.map(j=>e(JLC,{key:j.id,job:j,wb:wbCounts[j.id]||0,onClick:()=>onJob(j.id),wb:wbCounts[j.id]||0}))
         );
-      })()
+      })(),
+      /* v4.6.12 - PIN challenge rides inside the crew-view overlay */
+      pinClaim&&e(CrewPinVerifyModal,{claim:pinClaim,
+        onCancel:()=>setPinClaim(null),
+        onBound:()=>{lsSet(LS_MY_ID,pinClaim.id);setMyId(pinClaim.id);setPinClaim(null);}})
     ),
     e('div',{className:'screen'},
       e(WeekBanner,{jobs,contractorName}),
@@ -5205,21 +5348,28 @@ function HomeScreen({jobs,role,setRole,onJob,onNew,onDatabase,onSchedule,contrac
         e('div',{style:{fontWeight:700}},'No jobs match "'+search+'"')
       )
     ),
-    e('div',{style:{position:'fixed',bottom:24,right:20,display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end'}},
+    e('div',{className:'fab-stack',style:{position:'fixed',bottom:24,right:20,display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end',zIndex:40}},
+      /* v4.6.11j - field preference: + on top, then Pay Week, then My Database */
+      (role==='admin'||role==='shed_lead')&&e('button',{className:'fab',onClick:onNew},'+'),
       role==='admin'&&e('button',{onClick:()=>{setPwOffset(0);setShowPayWeek(true);},style:{background:'var(--hdr)',border:'1px solid rgba(255,255,255,.2)',borderRadius:24,padding:'10px 18px',color:'#ffffff',fontWeight:700,fontSize:13,cursor:'pointer',boxShadow:'0 4px 14px rgba(0,0,0,.3)'}},'💰 Pay Week'),
-      role==='admin'&&e('button',{onClick:onDatabase,style:{background:'var(--hdr)',border:'1px solid rgba(255,255,255,.2)',borderRadius:24,padding:'10px 18px',color:'#ffffff',fontWeight:700,fontSize:13,cursor:'pointer',boxShadow:'0 4px 14px rgba(0,0,0,.3)'}},'📂 My Database'),
-      (role==='admin'||role==='shed_lead')&&e('button',{className:'fab',onClick:onNew},'+')
+      role==='admin'&&e('button',{onClick:onDatabase,style:{background:'var(--hdr)',border:'1px solid rgba(255,255,255,.2)',borderRadius:24,padding:'10px 18px',color:'#ffffff',fontWeight:700,fontSize:13,cursor:'pointer',boxShadow:'0 4px 14px rgba(0,0,0,.3)'}},'📂 My Database')
     ),
     /* v4.6.7 - Pay Week Report sheet (admin) */
     showPayWeek&&(function(){
       var last=lsGet(LS_LAST_RATES)||{};
-      /* v4.6.9 - derive payday from the latest job so the report never depends on a stale device template */
+      /* v4.6.9 - derive payday from the latest job so the report never depends on a stale device template.
+         v4.6.11j - contractor_settings.default_rates comes FIRST: the latest-job rule was itself
+         poisoned by stale templates re-seeding every new job (proven 20 Jul: deliberate Saturday
+         picks overridden by payday-4 template jobs -> Thu-Wed periods). default_rates is
+         admin-set and device-proof; unset falls through to the previous behaviour exactly. */
+      var dfltPW=lsGet(LS_DEFAULT_RATES)||{};
       var srcJob=(jobs||[]).filter(function(j){return j&&j.rates&&j.rates.payDayOfWeek!=null&&j.status!=='Draft';})
         .sort(function(a,b){return String(b.startDate||'').localeCompare(String(a.startDate||''));})[0];
       var srcRates=srcJob?srcJob.rates:{};
-      var pd=srcRates.payDayOfWeek!=null?srcRates.payDayOfWeek:(last.payDayOfWeek!=null?last.payDayOfWeek:5);
-      var fq=(srcRates.payFrequency&&srcRates.payFrequency!=='shed')?srcRates.payFrequency
-        :((last.payFrequency&&last.payFrequency!=='shed')?last.payFrequency:'weekly');
+      var pd=dfltPW.payDayOfWeek!=null?dfltPW.payDayOfWeek:(srcRates.payDayOfWeek!=null?srcRates.payDayOfWeek:(last.payDayOfWeek!=null?last.payDayOfWeek:5));
+      var fq=(dfltPW.payFrequency&&dfltPW.payFrequency!=='shed')?dfltPW.payFrequency
+        :((srcRates.payFrequency&&srcRates.payFrequency!=='shed')?srcRates.payFrequency
+        :((last.payFrequency&&last.payFrequency!=='shed')?last.payFrequency:'weekly'));
       var period=getPeriodByOffset(localToday(),pd,pwOffset,fq);
       var txt=(pwView==='tallies')?generateTallyTrends(jobs,period,fq,4):generatePayWeekReport(jobs,period,contractorName);
       var doCopy=function(t,set){navigator.clipboard.writeText(t).then(function(){set(true);setTimeout(function(){set(false);},2000);}).catch(function(){});};
@@ -5400,6 +5550,8 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
                 e('div',null,
                   e('div',{style:{fontWeight:700,fontSize:15}},c.name),
                   e('div',{style:{fontSize:12,color:'var(--muted)',marginTop:2}},c.role+(c.phone?' · '+c.phone:'')+(c.hasVehicle?' · 🚗':''))
+                ,
+                  e(CrewPinRow,{c:c,onSave:handleSaveCrew}) /* v4.6.12 */
                 ),
                 e('div',{style:{display:'flex',gap:8}},
                   e('button',{onClick:()=>{setEditCrew(c.id);setConfirmDeleteCrew(null);},style:{background:'rgba(245,158,11,.15)',border:'1px solid rgba(245,158,11,.3)',borderRadius:7,padding:'6px 10px',color:'var(--amber)',fontWeight:700,fontSize:12,cursor:'pointer'}},'✏️ Edit'),
@@ -6315,7 +6467,8 @@ function App(){
   },[]);
 
   const addFarm=async f=>{setFarmList(p=>{const n=[...p,f];syncLookups(n,CREW);return n;});await dbSaveFarm(f).catch(()=>{});};
-  const addCrew=async c=>{setCrewList(p=>{const n=[...p,c];syncLookups(FARMS,n);return n;});await dbSaveCrew(c).catch(()=>{});};
+  const addCrew=async c=>{if(!c.pin)c.pin=genCrewPin(); /* v4.6.12 - auto-assign at creation */
+  setCrewList(p=>{const n=[...p,c];syncLookups(FARMS,n);return n;});await dbSaveCrew(c).catch(()=>{});};
   const gfl=id=>farmList.find(f=>f.id===id);
   const gcl=id=>crewList.find(c=>c.id===id);
   const selJob=jobs.find(j=>j.id===selJobId);
