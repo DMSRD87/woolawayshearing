@@ -599,8 +599,10 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.40';
+const APP_VERSION='v4.6.43a';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
+/* v4.6.43a (4 Sep 2026): CORRECTS TWO DEFECTS IN v4.6.43. (1) CREW GUARD RESTORED FOR SHED STAFF - v4.6.43 anchored the crew guard to rows from the shrink-guard query to avoid an extra request. That query filters kind='count' AND run_id<>'', which is how SHEARERS are stored; every wool handler, classer and presser is kind='shed_runs' with a blank run_id. 1,936 such rows across 164 crew fleet-wide, and 680 crew-job pairs (169 people) hold work with NO count rows at all. v4.6.43 would therefore have protected shearers while silently removing the protection for the wool handler the guard was written for on 25 Aug - a straight regression on the original fix, dressed as an improvement. The shrink-guard query is reverted to its original form and the crew guard now makes its own targeted request: crew with work on this job who are NOT already on the outgoing list. Normally zero rows, so it stays cheap on a bad link. Kinds limited to count/shed_runs/bales/bale_kg/cook_day - mess and travel are attendance attributes, the likeliest rows to survive a deliberate removal, and restoring on a stray mess row would re-apply a DEDUCTION to someone the lead meant to take off. (2) STALE-DEVICE RECOVERY - v4.6.43 made goOnline demote honestly on a cache fall-through, which was right, but autosave, flushNow AND the 20s background tally drain are all gated on isFreshRef. A demoted device therefore stops saving jobs and stops draining queued cells, and the only ways back were an 'online' event or a visibility change. On satellite or a hotspot the browser never reports offline, so it never reports online either: the device could sit stalled with a shed's cells held only in localStorage. The tick now retries a real load every third pass (~60s) while online and stale, and promotes on success. If the device is DIRTY it promotes WITHOUT replacing state, because overwriting unsaved local work with the server copy would be worse than the stall. */
+/* v4.6.43 (3 Sep 2026): CREW GUARD ANCHORED TO WORK + LOAD-PATH FIXES. Built on the v4.6.40 fleet master (cross-build hash verified identical across six contractors before edit). (1) CREW GUARD - the v4.6.30 version compared the outgoing crew list only against the SERVER's crew list, so it caught the second wipe and never the first: once any save had removed someone from the server copy, their tally rows became irrelevant because they could not enter `dropped`. A shearer with 200 head over four runs was invisible on a 12-person job on 3 Sep, board reading 892 against a true 1092. Now anyone with recorded work (value>0) on the job is merged back regardless of what the server lists. value>0 is deliberate: restoring on the mere existence of a row would make anyone holding a leftover zero-value cell permanently unremovable. The rows come from the existing shrink-guard query, widened to select crew_id and value, so this adds NO extra request per save. (2) SUNDRIES OFF THE SERIAL PATH - loadSundriesAll was awaited AFTER the jobs/farms/crew read, so on the largest contractor it queued behind everything and expired on its own 8s clock: 300 sundries_load_timeouts in 14 days on a contractor with ZERO sundries rows and a 96 kB table. Now started in parallel before the main await; deliberately not inside the Promise.all, so a sundries hang can never trip load_timeout and drop the whole load to cache. (3) goOnline NO LONGER LEAVES A CACHE LOAD FLAGGED FRESH - it pushed cached jobs into state and then only promoted on success, never demoted on failure, so a device that booted cleanly stayed 'fresh' all day through repeated failed reloads: no stale banner and save paths still armed, because they gate on isFreshRef. mountLoad and the visibility revalidate already demote; this path did not. This is the mechanism behind a stale device confidently overwriting good server data. (4) GUARD STAMPS REFRESHED AFTER A SUCCESSFUL SAVE, key-order-insensitive rates compare, and mob-rate trace logging - as shipped and harness-tested in v4.6.42. NO pay calculation, superable base, deduction, total or report output is touched. */
 /* v4.6.12a (26 Jul 2026): fleet-alignment rebuild - feature content identical to v4.6.12; new version string per one-build-one-version discipline. */
 /* v4.6.12 (20 Jul 2026): PER-CREW PIN, contractor-controlled (design settled with the founder before any deploy; an earlier worker-self-set draft was discarded - self-set has a bootstrap race where an imposter claims a name first and sets its PIN). MODEL: every worker is AUTO-ASSIGNED a random 4-digit PIN (genCrewPin at creation; existing crew backfilled via SQL per contractor at rollout). The PIN is stored READABLE at crew_members.data.pin and shown on the worker's card in My Database (admin-only surface) with a regenerate button and a 'Text PIN' button (plain GSM-7 SMS via /api/send-sms so the worker has it on file). DELIBERATE ENGINEERING CALL, not an oversight: with the shared anon key and a 4-digit space, a hash is brute-forced in under a second by anyone determined, so hashing here is theatre; readable storage buys contractor look-up-ability at no real security cost. This is a visibility gate against casual wrong-name claims - real authentication is v5 (Supabase Auth + RLS). CLAIM FLOW: picking a name with a PIN demands it (CrewPinVerifyModal, direct compare, works offline once the record is synced; names with PINs show a lock in the picker); 'Not you?' re-challenges; app_settings.requireCrewPin=true blocks claiming names with NO pin ('ask your contractor') for hard-lockdown contractors, off = pinless names bind as before. Workers never set or change their own PIN; contractor regenerates on request (specific chosen PINs = SRD via SQL). Lead/Admin PINs and the per-job PIN untouched. */
 /* v4.6.11j (20 Jul 2026): (1) PAY WEEK PAYDAY - now prefers contractor_settings.default_rates payDayOfWeek/payFrequency (durable, admin-set, boot-cached to LS_DEFAULT_RATES) over the latest-job rule. DB evidence 20 Jul: two contractors who deliberately picked Saturday (payday 6) had every subsequent job seeded payday 4 from stale pre-4.6.6 device templates (4 = old-picker 'Friday', post-fix Thursday), and the v4.6.9 latest-job rule adopted it -> Pay Week flipped to Thu-Wed periods ('reset from Saturday to Wednesday'). default_rates is the template devices can't overwrite; latest-job then device template remain the fallbacks, so contractors without default_rates behave exactly as before. NO period-maths change. (2) CREW CHIP DISAMBIGUATION - job-creation/crew-edit chips showed first name only; two same-first-name workers were identical chips. chipLabel adds a surname initial ONLY when first names clash in the group, full surname when initials clash too, phone last-3 when names are entirely identical. Unambiguous names render exactly as before. (3) QUICK-ACTION ORDER - + FAB moved to the top of the bottom-right admin stack (then Pay Week, then My Database) per field preference. (4) STAFF ROLE TOTALS - pay summary gains a role-combined block after per-worker staff lines (e.g. 'Wool Handlers (2): 16 runs - $1,360.00'); Pay Week report WEEK TOTALS gains role-combined wages. Roles with nothing to show are omitted. DISPLAY-ONLY: new lines assembled from already-computed per-worker figures; no pay calculation, superable base, tax, or totals maths touched; jobs whose reports are never re-generated are unaffected. */
@@ -1161,11 +1163,78 @@ function hydrateTallies(job,tallyRows){
 }
 
 /* ── DB HELPERS ── */
+/* ══ v4.6.42 — GUARD STAMPS, HELD OUTSIDE REACT STATE ════════════════════════
+   _srvStatus / _srvRates / _srvMobRates were stamped ONLY in dbLoad and never
+   refreshed after a successful save (findings 28 Aug, harness scenario D).
+   Once a device had itself saved a change, the stamp no longer described what
+   the server held, and every guard's central question — "does the value I am
+   about to write still match what I last saw?" — was being answered against a
+   lie. A user putting a field back to its load-time value after saving a change
+   to it earlier in the same session is then indistinguishable from a stale
+   device: the guard reverts the real edit and logs it as a successful catch.
+
+   Held in a module Map rather than written back onto the job object, because
+   buildStrippedJobBlob's own comment is right — the caller's job reference is
+   React state and must not be mutated. dbLoad clears the Map, so a fresh server
+   read always wins and the per-job _srv* markers stay the fallback for the
+   first save after a load. */
+const _srvStamp=new Map();
+/* Key-order-insensitive stringify. The rates guard compared raw JSON.stringify
+   on both sides, so any rebuild of the rates object with a different key
+   insertion order made a device that had NOT touched the rates fail the
+   equality test: the guard silently no-opped and the device overwrote the
+   server's rates. The failure direction was the exact bug it exists to stop. */
+function canonJSON(v){
+  if(v===null||v===undefined)return 'null';
+  if(typeof v!=='object')return JSON.stringify(v);
+  if(Array.isArray(v))return '['+v.map(canonJSON).join(',')+']';
+  return '{'+Object.keys(v).sort().map(function(k){
+    return JSON.stringify(k)+':'+canonJSON(v[k]);
+  }).join(',')+'}';
+}
+/* mobId -> rateOverride across every run/mob of a runs structure. */
+function mobRateMap(runs){
+  const m={};
+  Object.values(runs||{}).forEach(function(dayRuns){
+    (dayRuns||[]).forEach(function(run){
+      ((run&&run.mobs)||[]).forEach(function(mob){
+        if(mob&&mob.id)m[mob.id]=(mob.rateOverride===undefined?null:mob.rateOverride);
+      });
+    });
+  });
+  return m;
+}
+/* The stamp this device should be judged against: the Map when this device has
+   saved since its last load, otherwise the load-time markers on the job itself.
+   A legacy _srvRates string written by an earlier build is re-canonicalised on
+   the way through, so a job cached before this release still compares correctly
+   and there is no window where the rates guard is dead. */
+function stampFor(job){
+  const m=_srvStamp.get(job.id);
+  if(m)return m;
+  let rates=null;
+  if(job._srvRates){
+    try{rates=canonJSON(JSON.parse(job._srvRates));}catch(e){rates=null;}
+  }
+  return {status:job._srvStatus,rates:rates,mobRates:job._srvMobRates||null};
+}
 async function dbLoad(){
   try{
     /* Cap each select at 8s — if Supabase hangs we fall through to cache.
        Without this, dbLoad can sit forever on a marginal connection,
        blocking app startup. */
+    /* v4.6.43 — sundries kicked off HERE, in parallel with the three below,
+       instead of being awaited after them. It was serial: on the largest
+       contractor the jobs/farms/crew and tally reads consumed most of the
+       connection and the sundries call then timed out waiting its turn on its
+       own 8s clock — 300 sundries_load_timeouts in 14 days on a contractor with
+       ZERO sundries rows. Nothing was ever wrong with the query; it was queued
+       behind everything else. Starting it first costs nothing and removes up to
+       8 seconds of dead time from every load. Deliberately NOT inside the
+       Promise.all below: a sundries hang must never trip load_timeout and drop
+       the whole load to cache. It still swallows its own errors and returns
+       null, so the handling downstream is unchanged. */
+    const _sundriesPromise=loadSundriesAll();
     const [jr,fr,cr]=await withTimeout(Promise.all([
       sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false}),
       sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG),
@@ -1215,6 +1284,9 @@ async function dbLoad(){
       crew:(cr.data||[]).map(r=>r.data),
       fromCache:false,
     };
+    /* v4.6.43 — a successful server read supersedes any post-save stamps this
+       device accumulated; the _srv* markers stamped above are now the truth. */
+    _srvStamp.clear();
     /* v4.6.0 — hydrate tallies from the dedicated table. This is the
        source of truth for tally values; jobs.data tally fields are
        legacy/redundant and ignored on read. */
@@ -1228,7 +1300,7 @@ async function dbLoad(){
     /* v4.6.27 — single request for all jobs. null = the load failed
        (offline/timeout): keep whatever the cached job already had rather than
        wiping a previously-loaded list, exactly as the per-job version did. */
-    const _sundriesByJob=await loadSundriesAll();
+    const _sundriesByJob=await _sundriesPromise; /* v4.6.43 — started above, usually already settled */
     result.jobs.forEach(j=>{
       if(_sundriesByJob!==null)j.sundries=_sundriesByJob[j.id]||[];
       else if(!Array.isArray(j.sundries))j.sundries=[];
@@ -1619,27 +1691,64 @@ async function dbSaveJob(job){
            refusal here would make a job unsaveable, which is worse than the bug.
            Someone with no recorded work can still be removed normally. */
         try{
-          const srvCrew=Array.isArray(srv.crew)?srv.crew:[];
+          /* ══ v4.6.43 — ANCHOR THE GUARD TO THE WORK, NOT TO THE SERVER LIST ══
+             The v4.6.30 version only ever considered people already on the
+             SERVER's crew list:  dropped = srvCrew.filter(not in outCrew).
+             So it caught the SECOND wipe and never the first. Once any save had
+             removed someone from the server copy, every later save agreed they
+             were absent and their tally rows were irrelevant — they could not
+             enter `dropped`, so they could never be restored.
+
+             3 Sep: a shearer with 200 head across four runs was invisible on a
+             12-person job. His rows were in tally_entries the whole time; only
+             the crew list had lost him, and the guard was structurally blind to
+             him. The board read 892 shorn against a true 1092.
+
+             The rule is simply: anyone with recorded WORK on this job belongs on
+             its crew list, whatever the server currently says.
+
+             value>0 is deliberate. Restoring on the mere existence of a row
+             would make anyone with a leftover zero-value cell permanently
+             unremovable — a live complaint on another contractor. Zero work,
+             removable as normal. */
           const outCrew=Array.isArray(jobForBlob.crew)?jobForBlob.crew.slice():[];
-          const dropped=srvCrew.filter(cid=>cid&&outCrew.indexOf(cid)<0);
-          if(dropped.length>0){
-            const held=await withTimeout(
-              sb.from('tally_entries').select('crew_id')
-                .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id)
-                .in('crew_id',dropped).limit(200),
-              3000,'guard_crew_timeout'
-            ).catch(err=>({error:{message:'guard_crew_failed:'+err.message}}));
-            if(held&&!held.error&&Array.isArray(held.data)){
-              const withWork=[...new Set(held.data.map(r=>r.crew_id).filter(Boolean))];
-              const restore=withWork.filter(cid=>outCrew.indexOf(cid)<0);
-              if(restore.length>0){
-                restore.forEach(cid=>outCrew.push(cid));
-                jobForBlob.crew=outCrew;
-                logSaveFailure('guard_crew_restored',job.id,
-                  'restored='+restore.join(',')+';srv='+srvCrew.length+';incoming='+
-                  ((job.crew||[]).length));
-              }
-            }
+          /* v4.6.43a — ask the server ONLY for crew who hold work on this job and
+             are NOT already on the outgoing list. Normally that is zero rows, so
+             this is cheap on the wire even on a bad link.
+
+             v4.6.43 tried to avoid the round trip by reusing the shrink-guard
+             query. That query filters kind='count' AND run_id<>'', which is how
+             SHEARERS are stored. Every wool handler, classer and presser is
+             kind='shed_runs' with a blank run_id — 1,936 rows across 164 people
+             fleet-wide, none of them visible to that filter. It would have
+             protected shearers and silently dropped the protection for the wool
+             handler this guard was built for on 25 Aug. Correctness first: take
+             the extra request.
+
+             Kinds are limited to actual WORK. mess and travel are attendance
+             attributes and are the likeliest rows to be left behind after a
+             deliberate removal; restoring on those would resurrect someone the
+             lead meant to take off, and a stray mess row would re-apply a
+             DEDUCTION to them. */
+          let crewOrphans=null;
+          try{
+            let cq=sb.from('tally_entries').select('crew_id')
+              .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id)
+              .in('kind',['count','shed_runs','bales','bale_kg','cook_day'])
+              .gt('value',0).limit(50);
+            if(outCrew.length>0)cq=cq.not('crew_id','in','('+outCrew.join(',')+')');
+            const cr2=await withTimeout(cq,3000,'guard_crew_timeout')
+              .catch(err=>({error:{message:'guard_crew_failed:'+err.message}}));
+            if(cr2&&!cr2.error&&Array.isArray(cr2.data))crewOrphans=cr2.data;
+          }catch(cErr){ /* fail open — a guard must never block a save */ }
+          const withWork=[...new Set((crewOrphans||[]).map(r=>r&&r.crew_id).filter(Boolean))];
+          const restore=withWork.filter(cid=>outCrew.indexOf(cid)<0);
+          if(restore.length>0){
+            restore.forEach(cid=>outCrew.push(cid));
+            jobForBlob.crew=outCrew;
+            logSaveFailure('guard_crew_restored',job.id,
+              'restored='+restore.join(',')+';srv='+((srv.crew||[]).length)+';incoming='+
+              ((job.crew||[]).length));
           }
         }catch(crewErr){
           logSaveFailure('guard_crew_error',job.id,(crewErr&&crewErr.message)||'unknown');
@@ -1651,9 +1760,12 @@ async function dbSaveJob(job){
            changing the status — it is carrying an old value — so keep whatever
            the server has now. A genuine change by this user differs from the
            stamp and is written through untouched. */
-        if(job._srvStatus&&jobForBlob.status===job._srvStatus&&srv.status&&srv.status!==jobForBlob.status){
+        /* v4.6.43 — read via stampFor, so the stamp reflects this device's last
+           successful SAVE as well as its last load. Rule itself is unchanged. */
+        const _stamp=stampFor(job);
+        if(_stamp.status&&jobForBlob.status===_stamp.status&&srv.status&&srv.status!==jobForBlob.status){
           logSaveFailure('guard_status_kept',job.id,
-            'device_had='+job._srvStatus+';server_now='+srv.status);
+            'device_had='+_stamp.status+';server_now='+srv.status);
           jobForBlob.status=srv.status;
         }
         /* v4.6.30 — rates carry the same exposure and it is the one that moves
@@ -1661,10 +1773,12 @@ async function dbSaveJob(job){
            the whole job for everyone on it. Same rule — if this device did not
            touch the rates, it has no business overwriting them. */
         try{
-          if(job._srvRates&&srv.rates){
-            const outRates=JSON.stringify(jobForBlob.rates||{});
-            const srvRates=JSON.stringify(srv.rates||{});
-            if(outRates===job._srvRates&&srvRates!==outRates){
+          if(_stamp.rates&&srv.rates){
+            /* v4.6.43 — canonJSON on both sides: key insertion order no longer
+               decides whether this guard fires. */
+            const outRates=canonJSON(jobForBlob.rates||{});
+            const srvRates=canonJSON(srv.rates||{});
+            if(outRates===_stamp.rates&&srvRates!==outRates){
               logSaveFailure('guard_rates_kept',job.id,'device_unchanged;server_differs');
               jobForBlob.rates=srv.rates;
             }
@@ -1677,36 +1791,49 @@ async function dbSaveJob(job){
            override and has no business clearing one set elsewhere. A deliberate
            clear differs from the stamp and is written through. */
         try{
-          const stamp=job._srvMobRates||null;
-          if(stamp){
-            const srvMob={};
-            Object.values((srv.runs)||{}).forEach(function(dayRuns){
-              (dayRuns||[]).forEach(function(run){
-                ((run&&run.mobs)||[]).forEach(function(mob){
-                  if(mob&&mob.id)srvMob[mob.id]=(mob.rateOverride===undefined?null:mob.rateOverride);
-                });
-              });
-            });
-            const restored=[];
-            Object.values((jobForBlob.runs)||{}).forEach(function(dayRuns){
-              (dayRuns||[]).forEach(function(run){
-                ((run&&run.mobs)||[]).forEach(function(mob){
-                  if(!mob||!mob.id)return;
-                  if(!(mob.id in srvMob))return;          /* mob is new on this device */
-                  if(!(mob.id in stamp))return;           /* never seen from the server */
-                  const outVal=(mob.rateOverride===undefined?null:mob.rateOverride);
-                  const srvVal=srvMob[mob.id];
+          const stamp=_stamp.mobRates;
+          const srvMob=mobRateMap(srv.runs);
+          const restored=[];
+          /* v4.6.42 — the guard had five exits and only two of them spoke, so a
+             lost override left no evidence at all. Every mob whose outgoing
+             value disagrees with the server now records the verdict that
+             decided it. A mob that agrees with the server cannot lose anything,
+             so it is not recorded — on an ordinary save this writes nothing. */
+          const trace=[];
+          Object.values((jobForBlob.runs)||{}).forEach(function(dayRuns){
+            (dayRuns||[]).forEach(function(run){
+              ((run&&run.mobs)||[]).forEach(function(mob){
+                if(!mob||!mob.id)return;
+                const outVal=(mob.rateOverride===undefined?null:mob.rateOverride);
+                const inSrv=(mob.id in srvMob);
+                const srvVal=inSrv?srvMob[mob.id]:undefined;
+                let verdict;
+                if(!stamp)verdict='no_stamp';                    /* guard skipped entirely */
+                else if(!inSrv)verdict='new_on_device';          /* mob is new on this device */
+                else if(!(mob.id in stamp))verdict='unseen';     /* never seen from the server */
+                else{
                   const seenVal=stamp[mob.id];
                   if(String(outVal)===String(seenVal)&&String(srvVal)!==String(outVal)){
                     mob.rateOverride=srvVal;
                     restored.push(mob.id+':'+String(outVal)+'->'+String(srvVal));
+                    verdict='kept';
+                  }else{
+                    verdict='written_through';
                   }
-                });
+                }
+                if(inSrv&&String(srvVal)!==String(outVal)&&trace.length<12){
+                  trace.push(mob.id+':out='+String(outVal)+';srv='+String(srvVal)
+                    +';seen='+((stamp&&(mob.id in stamp))?String(stamp[mob.id]):'?')
+                    +';'+verdict);
+                }
               });
             });
-            if(restored.length>0){
-              logSaveFailure('guard_mobrate_kept',job.id,restored.join(','));
-            }
+          });
+          if(restored.length>0){
+            logSaveFailure('guard_mobrate_kept',job.id,restored.join(','));
+          }
+          if(trace.length>0){
+            logSaveFailure('mobrate_trace',job.id,trace.join(' | ').slice(0,480));
           }
         }catch(mrErr){
           logSaveFailure('guard_mobrate_error',job.id,(mrErr&&mrErr.message)||'unknown');
@@ -1730,6 +1857,18 @@ async function dbSaveJob(job){
     const result=await withTimeout(upsertCall,12000,'upsert_timeout');
     if(result&&result.error)throw new Error(result.error.message);
     dequeue('job',job.id);
+    /* v4.6.43 — the blob just written IS what the server now holds, so make it
+       this device's stamp. Only on this path: the offline, queued and rejected
+       paths all return before the upsert and have learned nothing. */
+    try{
+      _srvStamp.set(job.id,{
+        status:jobForBlob.status,
+        rates:canonJSON(jobForBlob.rates||{}),
+        mobRates:mobRateMap(jobForBlob.runs)
+      });
+    }catch(stampErr){
+      logSaveFailure('stamp_refresh_error',job.id,(stampErr&&stampErr.message)||'unknown');
+    }
     /* PATCH A — Snapshot system. Snapshots use the FULL job (including
        tallies from React state) as a recovery option. Yesterday and
        earlier snapshots remain frozen and intact. */
@@ -8031,6 +8170,17 @@ function App(){
             setFresh(true,'goOnline_refetch');
             dirtyRef.current=false; /* state is now fresh from Supabase, not dirty */
             logSaveFailure('diag_load','goOnline_dbLoad','promoted_to_fresh');
+          }else{
+            /* v4.6.43 — this branch did not exist. The jobs pushed into state
+               above came from the CACHE, but freshness was left alone, so a
+               device that booted cleanly in the morning stayed flagged fresh all
+               day through repeated failed reloads: no stale banner, and the save
+               paths stayed armed because they gate on isFreshRef. That is how a
+               device ends up confidently writing an old copy over a good one.
+               mountLoad and the visibility revalidate both demote correctly;
+               this path was the one that did not. */
+            setFresh(false,'goOnline_from_cache');
+            logSaveFailure('diag_load','goOnline_dbLoad','stale_from_cache;online='+navigator.onLine);
           }
         });
       }else{
@@ -8071,8 +8221,46 @@ function App(){
      self-healing without user action. */
   useEffect(()=>{
     let running=false; /* v4.6.3g — re-entrancy guard: never let a slow flush overlap the next tick */
+    let staleTries=0;
     const tick=async()=>{
       if(running)return;
+      /* v4.6.43a — STALE RECOVERY. Everything below (and autosave, and flushNow)
+         is gated on isFreshRef, so a device demoted to stale stops saving jobs
+         AND stops draining the tally queue. Before v4.6.43 nothing demoted on
+         this path so the trap did not exist; now that goOnline demotes honestly,
+         a device needs a way back that does not depend on the user happening to
+         background and reopen the app. On satellite or a hotspot the browser
+         never fires 'offline', so it never fires 'online' either, and that was
+         the only other way out. Retry a real load every third tick (~60s) while
+         online and stale, and promote if it comes back from the server. */
+      if(navigator.onLine&&!isFreshRef.current&&isLoaded.current){
+        staleTries++;
+        if(staleTries%3===0){
+          running=true;
+          try{
+            const r=await dbLoad();
+            if(r&&!r.fromCache){
+              if(dirtyRef.current){
+                /* Local edits made while saves were blocked. Do NOT replace state
+                   with the server copy — that would destroy a shed's work, which
+                   is worse than the stall this is fixing. Promote only, so the
+                   local changes save up through the guards on the next pass. */
+                setFresh(true,'stale_recovery_dirty');
+                logSaveFailure('diag_load','stale_recovery','promoted_dirty;ticks='+staleTries);
+              }else{
+                syncLookups(r.farms,r.crew);
+                suppressNextSaveRef.current=true;
+                setJobs(r.jobs.map(j=>migrateJobRoles(j,r.crew)));
+                setFarmList(r.farms);setCrewList(r.crew);
+                setFresh(true,'stale_recovery');
+                logSaveFailure('diag_load','stale_recovery','recovered_clean;ticks='+staleTries);
+              }
+            }
+          }catch(e){}finally{running=false;}
+        }
+        return;
+      }
+      staleTries=0;
       if(!navigator.onLine||!isFreshRef.current)return;
       /* Only drain the per-CELL tally queue here. The whole-job queue (LS_QUEUE)
          pushes a stripped job BLOB, and a background push of a stale blob is the
