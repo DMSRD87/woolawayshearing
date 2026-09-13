@@ -599,8 +599,11 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.43a';
+const APP_VERSION='v4.6.47';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
+/* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
+/* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
+/* v4.6.44 (4 Sep 2026): DAY NOTES OPEN TO EVERYONE, MOVED OUT OF THE JOB BLOB. Day notes were job.dayNotes[date] inside the job blob, gated to lead/admin. The ask was to open them to anyone, farmers included, the same as the whiteboard. Flipping the gate alone would have meant every phone in the shed writing a FULL JOB BLOB to record a one-line note - the identical write that lost a shearer's 200 head on 3 Sep and a wool handler's five runs on 25 Aug, moved from a couple of lead devices onto every handset on the worst connections in the fleet, while timed-out requests are still uncancelled. So notes now work the way the whiteboard already does: their own table (job_day_notes, natural key contractor_slug+job_id+note_date, RLS allow_all mirroring job_whiteboard), one small row per job per day, loaded with the tab, written debounced at 900ms, no blob involvement and no autosave. HARD PREREQUISITE: the job_day_notes table must exist BEFORE this file is deployed - it was created and the 39 existing notes across 8 contractors backfilled on 4 Sep. Blob dayNotes are still READ as a fallback so a job looks the same on a contractor still on an older build; they are no longer written, so the two stores cannot fight. CONCURRENT EDITS: several people can now hold the same box open. On write the row is re-read, and if it moved since we loaded it and the incoming text does not already contain theirs, the two are APPENDED rather than replaced. A messy note is recoverable; a wiped one is not. Last editor's role and time are shown under the box. NO pay calculation or report output is touched. */
 /* v4.6.43a (4 Sep 2026): CORRECTS TWO DEFECTS IN v4.6.43. (1) CREW GUARD RESTORED FOR SHED STAFF - v4.6.43 anchored the crew guard to rows from the shrink-guard query to avoid an extra request. That query filters kind='count' AND run_id<>'', which is how SHEARERS are stored; every wool handler, classer and presser is kind='shed_runs' with a blank run_id. 1,936 such rows across 164 crew fleet-wide, and 680 crew-job pairs (169 people) hold work with NO count rows at all. v4.6.43 would therefore have protected shearers while silently removing the protection for the wool handler the guard was written for on 25 Aug - a straight regression on the original fix, dressed as an improvement. The shrink-guard query is reverted to its original form and the crew guard now makes its own targeted request: crew with work on this job who are NOT already on the outgoing list. Normally zero rows, so it stays cheap on a bad link. Kinds limited to count/shed_runs/bales/bale_kg/cook_day - mess and travel are attendance attributes, the likeliest rows to survive a deliberate removal, and restoring on a stray mess row would re-apply a DEDUCTION to someone the lead meant to take off. (2) STALE-DEVICE RECOVERY - v4.6.43 made goOnline demote honestly on a cache fall-through, which was right, but autosave, flushNow AND the 20s background tally drain are all gated on isFreshRef. A demoted device therefore stops saving jobs and stops draining queued cells, and the only ways back were an 'online' event or a visibility change. On satellite or a hotspot the browser never reports offline, so it never reports online either: the device could sit stalled with a shed's cells held only in localStorage. The tick now retries a real load every third pass (~60s) while online and stale, and promotes on success. If the device is DIRTY it promotes WITHOUT replacing state, because overwriting unsaved local work with the server copy would be worse than the stall. */
 /* v4.6.43 (3 Sep 2026): CREW GUARD ANCHORED TO WORK + LOAD-PATH FIXES. Built on the v4.6.40 fleet master (cross-build hash verified identical across six contractors before edit). (1) CREW GUARD - the v4.6.30 version compared the outgoing crew list only against the SERVER's crew list, so it caught the second wipe and never the first: once any save had removed someone from the server copy, their tally rows became irrelevant because they could not enter `dropped`. A shearer with 200 head over four runs was invisible on a 12-person job on 3 Sep, board reading 892 against a true 1092. Now anyone with recorded work (value>0) on the job is merged back regardless of what the server lists. value>0 is deliberate: restoring on the mere existence of a row would make anyone holding a leftover zero-value cell permanently unremovable. The rows come from the existing shrink-guard query, widened to select crew_id and value, so this adds NO extra request per save. (2) SUNDRIES OFF THE SERIAL PATH - loadSundriesAll was awaited AFTER the jobs/farms/crew read, so on the largest contractor it queued behind everything and expired on its own 8s clock: 300 sundries_load_timeouts in 14 days on a contractor with ZERO sundries rows and a 96 kB table. Now started in parallel before the main await; deliberately not inside the Promise.all, so a sundries hang can never trip load_timeout and drop the whole load to cache. (3) goOnline NO LONGER LEAVES A CACHE LOAD FLAGGED FRESH - it pushed cached jobs into state and then only promoted on success, never demoted on failure, so a device that booted cleanly stayed 'fresh' all day through repeated failed reloads: no stale banner and save paths still armed, because they gate on isFreshRef. mountLoad and the visibility revalidate already demote; this path did not. This is the mechanism behind a stale device confidently overwriting good server data. (4) GUARD STAMPS REFRESHED AFTER A SUCCESSFUL SAVE, key-order-insensitive rates compare, and mob-rate trace logging - as shipped and harness-tested in v4.6.42. NO pay calculation, superable base, deduction, total or report output is touched. */
 /* v4.6.12a (26 Jul 2026): fleet-alignment rebuild - feature content identical to v4.6.12; new version string per one-build-one-version discipline. */
@@ -1235,11 +1238,18 @@ async function dbLoad(){
        the whole load to cache. It still swallows its own errors and returns
        null, so the handling downstream is unchanged. */
     const _sundriesPromise=loadSundriesAll();
+    /* v4.6.45 — Promise.all has no abortSignal of its own, so the three reads
+       share one controller and it is handed to withTimeout explicitly. Without
+       this, a load that times out leaves three requests still on the wire; the
+       jobs read is the largest payload in the app and the one most likely to
+       land late and stale. */
+    const _loadCtrl=(typeof AbortController!=='undefined')?new AbortController():null;
+    const _sig=q=>(_loadCtrl&&typeof q.abortSignal==='function')?q.abortSignal(_loadCtrl.signal):q;
     const [jr,fr,cr]=await withTimeout(Promise.all([
-      sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false}),
-      sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG),
-      sb.from('crew_members').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG),
-    ]),8000,'load_timeout');
+      _sig(sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false})),
+      _sig(sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG)),
+      _sig(sb.from('crew_members').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG)),
+    ]),8000,'load_timeout',_loadCtrl);
     /* CRITICAL: if any of the three calls returned an error (or the SW
        offline stub returned fake-200-with-error), DO NOT trust the result.
        Treat as offline — fall through to cache. Without this check, a
@@ -1436,12 +1446,49 @@ async function dbLoad(){
    11:46, and the crew only found out at knock-off.
    Writes get 12s because a write that times out risks data; loads stay at 8s
    because a load that times out simply retries and a long hang feels broken. */
-function withTimeout(promise,ms,label){
-  let timer;
+/* ══ v4.6.45 — A TIMED-OUT REQUEST IS NOW ACTUALLY CANCELLED ═════════════════
+   withTimeout was a bare Promise.race. When the timer won, the promise rejected
+   and the caller queued the write for retry — but the underlying request was
+   NEVER cancelled. It stayed on the wire.
+
+   On satellite the link drops for one to three minutes at a time. Requests fired
+   during that window sit in the connection queue; the browser reports online the
+   whole time, so nothing stops them being fired. When the link returns they all
+   flush at once, each carrying the blob it was built with minutes earlier, in
+   whatever order the satellite delivers them. A save that "failed" lands anyway,
+   at an unpredictable moment, with stale data — and no guard can stop it,
+   because the guards ran when the request was CONSTRUCTED, against a server
+   state that no longer exists. 27 such bursts on one contractor in 14 days.
+
+   postgrest builders are lazy and expose abortSignal(), so attaching a
+   controller here fixes all 26 call sites without touching one of them. Callers
+   that wrap a Promise.all pass their own controller as the 4th argument, since
+   Promise.all has no signal of its own.
+
+   LIMIT, stated plainly: abort stops a request that has not yet reached the
+   server, which during an outage is the common case. It CANNOT undo a request
+   Postgres has already received and committed — we simply never hear the reply.
+   Closing that last gap needs optimistic concurrency on the write (reject if the
+   row moved since we read it), which is a separate piece of work. */
+let _netFails=0,_netOk=0;   /* consecutive timeouts / lifetime successes */
+function netHealth(){return {consecutiveTimeouts:_netFails,successes:_netOk};}
+function withTimeout(promise,ms,label,ctrl){
+  let timer,controller=ctrl||null,target=promise;
+  if(!controller&&typeof AbortController!=='undefined'&&promise&&typeof promise.abortSignal==='function'){
+    try{controller=new AbortController();target=promise.abortSignal(controller.signal);}
+    catch(e){controller=null;target=promise;}
+  }
   const timeout=new Promise((_,reject)=>{
-    timer=setTimeout(()=>reject(new Error(label||'timeout')),ms);
+    timer=setTimeout(()=>{
+      /* cancel first, THEN reject, so the caller can never be racing a request
+         that is still able to land. */
+      try{if(controller)controller.abort();}catch(e){}
+      _netFails++;
+      reject(new Error(label||'timeout'));
+    },ms);
   });
-  return Promise.race([promise,timeout]).finally(()=>clearTimeout(timer));
+  return Promise.race([Promise.resolve(target).then(v=>{_netFails=0;_netOk++;return v;}),timeout])
+    .finally(()=>clearTimeout(timer));
 }
 
 /* logSaveFailure — best-effort forensic insert. Captures save failures so
@@ -1463,7 +1510,12 @@ function logSaveFailure(reason,jobId,details){
       details:(details||'').toString().slice(0,1000), /* cap long stack traces */
       user_agent:(navigator.userAgent||'').slice(0,500),
       online_status:navigator.onLine,
-      queue_length:(lsGet(LS_QUEUE)||[]).length
+      queue_length:(lsGet(LS_QUEUE)||[]).length,
+      /* v4.6.45 — which build produced this row. Without it, telling whether a
+         fix worked meant inferring the build from commit timestamps, which is
+         guesswork; a device running yesterday's cached file is indistinguishable
+         from one running today's. Every measurement from here depends on this. */
+      app_version:APP_VERSION
     };
     /* Fire and forget. 3s timeout. Errors silently ignored. */
     withTimeout(
@@ -2743,6 +2795,10 @@ function generateSummary(job,period){
   let totalShEarn=0,totalShedEarn=0,totalTravel=0,totalTeamLoad=0,totalStand=0,totalSuperable=0;
   const L=[];
   L.push('PAY SUMMARY \u2014 '+(farm?farm.name.toUpperCase():'JOB'));
+  /* v4.6.46 — the farm record has carried 'Job #' since v4.6.3, the pay summary
+     never did. A printed pay summary showed the farm name only, so two jobs at
+     the same farm were indistinguishable on paper once they left the app. */
+  L.push('Job #:  '+(job.jobNumber||'\u2014')+' \u2014 '+(job.type||''));
   if(farm)L.push('Address: '+farm.address+'  |  From: '+fmtDate(job.startDate));
   if(period)L.push('Pay Period: '+fmtPeriodLabel(period.start,period.end));
   L.push('Status: '+job.status.toUpperCase());
@@ -3229,7 +3285,13 @@ function generatePayWeekReport(jobs,period,contractorName){
       const p=per[id];p.lines=p.lines.concat(w.lines);
       ['piece','teamLoad','staffEarn','travel','stand','standSuper','tax','mess','sundries'].forEach(k=>{p[k]+=w[k]||0;});
     });
-    const shedName=(gf(job.farmId)||{}).name||job.jobName||'Job';
+    /* v4.6.46 — job number appended. This is also the GROUPING KEY and the CSV
+       'shed' column, so two jobs at the same farm inside one pay period now
+       report as two lines instead of silently merging into one. That is the
+       point: a payroll officer querying a figure needs to know which shed it
+       came from. No amount changes - the same earnings are split across two
+       correctly-labelled lines instead of pooled under one ambiguous one. */
+    const shedName=((gf(job.farmId)||{}).name||job.jobName||'Job')+(job.jobNumber?' (#'+job.jobNumber+')':'');
     if(any&&sheds.indexOf(shedName)<0)sheds.push(shedName);
     if(jobGross>0.005){
       if(team)checks.push({shed:shedName,skip:true});
@@ -3610,6 +3672,7 @@ async function savePin(type,newVal){
    Master PIN bypasses for SRD support. Verified flag in localStorage = the hash
    itself, so password rotation invalidates old devices automatically. */
 const LS_ACCESS_VERIFIED='mg_access_verified_'+CONTRACTOR_SLUG;
+const LS_ACCESS_HASH='mg_access_hash_'+CONTRACTOR_SLUG; /* v4.6.47 — cached so the gate works without signal */
 let _accessHash=null;
 let _accessLoaded=false;
 
@@ -3629,10 +3692,24 @@ async function loadDefaultRates(){
 
 async function loadAccessHash(){
   if(_accessLoaded)return;
+  /* v4.6.47 — cached hash first, so a poor-signal or offline open still has the
+     real gate state instead of falling open (no hash = no gate). */
+  const cachedHash=lsGet(LS_ACCESS_HASH);
+  if(typeof cachedHash==='string'&&cachedHash)_accessHash=cachedHash;
   try{
-    const result=await sb.from('contractor_settings').select('access_password_hash').eq('contractor_slug',CONTRACTOR_SLUG).maybeSingle();
+    /* v4.6.47 — this gates accessReady, i.e. whether ANYTHING renders. It was the
+       one boot call with no timeout: the v4.6.45 abort sweep covered saves and
+       missed it. On a link that is up but not passing packets it sat in the OS
+       queue for a minute or more while the app showed a spinner — reported live
+       as "can't open the app in poor signal". 4s, then fall through to cache. */
+    const result=await withTimeout(
+      sb.from('contractor_settings').select('access_password_hash').eq('contractor_slug',CONTRACTOR_SLUG).maybeSingle(),
+      4000,'access_hash_timeout');
     if(result&&!result.error&&result.data){
       _accessHash=result.data.access_password_hash||null;
+      /* Clear the cache when a contractor has no access password, so a removed
+         gate does not keep gating from a stale cached hash. */
+      if(_accessHash)lsSet(LS_ACCESS_HASH,_accessHash);else lsRemove(LS_ACCESS_HASH);
     }
     _accessLoaded=true;
   }catch(e){
@@ -4380,7 +4457,82 @@ const flushMobDesc=(mid,v)=>{
     writeTallyCell({jobId:job.id,kind:'bale_kg',crewId:cid,date:viewDate,value:val});
   };
   const baleTot=id=>Object.values(job.baleTallies[id]||{}).reduce((a,b)=>a+b,0);
-  const setNote=v=>setJob(prev=>({...prev,dayNotes:{...prev.dayNotes,[viewDate]:v}}));
+  /* ══ v4.6.44 — DAY NOTES MOVED OUT OF THE JOB BLOB ═══════════════════════════
+     Day notes were job.dayNotes[date], inside the blob, gated to lead/admin.
+     Opening the gate without moving the storage would have meant every phone in
+     the shed writing a FULL JOB BLOB to make a one-line note — the exact write
+     that lost a shearer's 200 head and a wool handler's five runs, moved from a
+     couple of lead devices onto every handset on the worst connections we have.
+
+     So notes now work the way the whiteboard already does: their own table, one
+     small row per job per day, no blob involvement. Anyone with the tab open can
+     write one, farmers included.
+
+     Blob dayNotes are still READ as a fallback so nothing looks empty on a
+     contractor who has not taken this build yet; they are no longer written. */
+  const [noteMap,setNoteMap]=useState(null);        /* date -> {body,role,at} */
+  const [noteDraft,setNoteDraft]=useState(null);    /* uncontrolled-ish local echo */
+  const noteTimer=useRef(null);
+  const noteLoadedAt=useRef({});                    /* date -> updated_at we last saw */
+  useEffect(()=>{
+    let dead=false;
+    (async()=>{
+      try{
+        const r=await withTimeout(sb.from('job_day_notes')
+          .select('note_date,body,updated_by_role,updated_at')
+          .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id),
+          8000,'daynotes_load_timeout');
+        if(dead)return;
+        if(r&&!r.error&&Array.isArray(r.data)){
+          const m={};
+          r.data.forEach(row=>{m[row.note_date]={body:row.body||'',role:row.updated_by_role||'',at:row.updated_at};
+            noteLoadedAt.current[row.note_date]=row.updated_at;});
+          setNoteMap(m);
+        }else setNoteMap({});
+      }catch(e){ if(!dead)setNoteMap({}); }
+    })();
+    return()=>{dead=true;};
+  },[job.id]);
+  useEffect(()=>{setNoteDraft(null);},[viewDate]);
+  const noteRole=role==='farmer'?'Farmer':(role==='admin'?'Admin':(role==='shed_lead'?'Lead':'Crew'));
+  const noteServer=(noteMap&&noteMap[viewDate])||null;
+  const noteFallback=(job.dayNotes||{})[viewDate]||'';
+  const noteValue=noteDraft!==null?noteDraft:(noteServer?noteServer.body:noteFallback);
+  const pushNote=async(text)=>{
+    try{
+      /* NO SILENT LOSS. Several people can now hold this box open at once. If the
+         server row moved since we loaded it and the text is not ours, append
+         instead of replacing — a messy note is recoverable, a wiped one is not. */
+      let body=text;
+      const cur=await withTimeout(sb.from('job_day_notes')
+        .select('body,updated_at').eq('contractor_slug',CONTRACTOR_SLUG)
+        .eq('job_id',job.id).eq('note_date',viewDate).maybeSingle(),6000,'daynote_read_timeout');
+      if(cur&&!cur.error&&cur.data){
+        const seen=noteLoadedAt.current[viewDate];
+        if(seen&&cur.data.updated_at!==seen&&(cur.data.body||'')!==text){
+          const theirs=(cur.data.body||'').trim();
+          if(theirs&&text.indexOf(theirs)<0)body=theirs+'\n'+text;
+        }
+      }
+      const at=new Date().toISOString();
+      const w=await withTimeout(sb.from('job_day_notes').upsert({
+        contractor_slug:CONTRACTOR_SLUG,job_id:job.id,note_date:viewDate,
+        body:body,updated_by_role:noteRole,updated_at:at
+      },{onConflict:'contractor_slug,job_id,note_date'}),12000,'daynote_write_timeout');
+      if(w&&w.error)throw new Error(w.error.message);
+      noteLoadedAt.current[viewDate]=at;
+      setNoteMap(m=>({...(m||{}),[viewDate]:{body:body,role:noteRole,at:at}}));
+      if(body!==text)setNoteDraft(body);
+    }catch(e){
+      logSaveFailure(/timeout$/.test(e&&e.message||'')?'timeout':'error','daynote',
+        (e&&e.message)||'unknown');
+    }
+  };
+  const setNote=v=>{
+    setNoteDraft(v);
+    clearTimeout(noteTimer.current);
+    noteTimer.current=setTimeout(()=>pushNote(v),900);
+  };
   const setTravel=(cid,val)=>{
     setJob(prev=>({...prev,travelTallies:{...(prev.travelTallies||{}),[cid]:{...((prev.travelTallies||{})[cid]||{}),[viewDate]:val}}}));
     writeTallyCell({jobId:job.id,kind:'travel',crewId:cid,date:viewDate,value:val?1:0});
@@ -4740,7 +4892,20 @@ const flushMobDesc=(mid,v)=>{
         );
       })
     ),
-    e('div',{className:'notes-wrap'},e('div',{className:'notes-lbl'},'Notes — '+fmtDateLong(viewDate)),e('textarea',{className:'notes-ta',rows:3,placeholder:'Notes for the day...',value:(job.dayNotes||{})[viewDate]||'',disabled:!canEdit,onChange:ev=>setNote(ev.target.value)})),
+    e('div',{className:'notes-wrap'},
+      e('div',{className:'notes-lbl'},'Notes \u2014 '+fmtDateLong(viewDate)),
+      e('textarea',{className:'notes-ta',rows:3,
+        placeholder:noteMap===null?'Loading notes...':'Notes for the day \u2014 anyone can add',
+        value:noteValue,
+        /* v4.6.44 — no role gate, same as the whiteboard. Farmers included. */
+        onChange:ev=>setNote(ev.target.value)}),
+      noteServer&&noteServer.role&&noteServer.role!=='migrated'&&e('div',{
+        style:{fontSize:10,color:'var(--dim)',marginTop:3,textAlign:'right'}},
+        'Last edit: '+noteServer.role+(noteServer.at?' \u00b7 '+(()=>{
+          try{return new Date(noteServer.at).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}
+          catch(e){return '';}
+        })():''))
+    ),
     e(BookPhotoPanel,{job,viewDate,role}), /* v4.6.11 */
     e('div',{style:{height:20}})
   );
@@ -6727,7 +6892,8 @@ function SeasonStats({jobs,onClose}){
 
   const jobById={}; (jobs||[]).forEach(j=>{jobById[j.id]=j;});
   const shedName=jid=>{const j=jobById[jid];if(!j)return'(unknown job)';
-    const f=gf(j.farmId);return (f&&f.name)||j.jobName||j.jobNumber||'(unnamed)';};
+    const f=gf(j.farmId);const nm=(f&&f.name)||j.jobName||'(unnamed)';
+  return nm+(j.jobNumber?' (#'+j.jobNumber+')':'');};  /* v4.6.46 — identify the job, not just the farm */
 
   /* ── aggregate ──────────────────────────────────────────────────────────── */
   const agg=(()=>{
