@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.50';
+const APP_VERSION='v4.6.51';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -3389,6 +3389,21 @@ function generatePayWeekCSV(jobs,period){
   return rows.map(r=>r.map(esc).join(',')).join('\n');
 }
 /* v4.6.12 - crew PIN helpers */
+/* ══ v4.6.51 — ACTIVE / INACTIVE CREW ═════════════════════════════════════════
+   Deleting a crew member removed the record but left their tally rows pointing
+   at nothing: their work became invisible and pay summaries could not be
+   regenerated. That is how thousands of head ended up orphaned, and seven
+   records only came back because an old recovery project still had them.
+
+   Seasonal workers made it worse — the only choices were leave them cluttering
+   every picker, or delete them and lose the history.
+
+   Inactive keeps the record and the history, and hides them from the pickers.
+   They come back as the SAME person with the same id, which also stops leads
+   inventing a second record because the original was not findable.
+
+   Absent means active, so nothing changes for anyone already on the books. */
+function isActiveCrew(c){return !!c&&c.active!==false;}
 function genCrewPin(){return String(Math.floor(Math.random()*10000)).padStart(4,'0');}
 /* v4.6.48 — crew PINs are now opt-out per contractor. Some contractors do not
    want crew logging in at all: farmer plus lead/admin only. Unset means enabled,
@@ -4256,11 +4271,15 @@ function BookPhotoPanel({job,viewDate,role}){
     rec&&pubUrl&&e('a',{href:pubUrl,target:'_blank',rel:'noopener'},
       e('img',{src:pubUrl,alt:'Tally book photo',style:{width:'100%',maxHeight:260,objectFit:'contain',borderRadius:10,border:'1px solid var(--border)',background:'#000'}})),
     rec&&e('div',{style:{color:'var(--muted)',fontSize:12,margin:'6px 0'}},'Taken '+new Date(rec.taken_at).toLocaleString('en-AU',{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'})),
-    !rec&&!busy&&e('div',{style:{color:'var(--muted)',fontSize:13,margin:'6px 0'}},canTake?'Snap the tally book at knock-off \u2014 one photo per day.':'No book photo for this day yet.'),
+    !rec&&!busy&&e('div',{style:{color:'var(--muted)',fontSize:13,margin:'6px 0'}},canTake?'Add the tally book at knock-off \u2014 camera or gallery, one photo per day.':'No book photo for this day yet.'),
     busy&&e('div',{style:{color:'var(--muted)',fontSize:13,margin:'6px 0'}},'Uploading\u2026'),
     msg&&e('div',{style:{color:'var(--amber)',fontSize:13,margin:'6px 0',fontWeight:700}},msg),
-    canTake&&e('button',{className:'btn-g',style:{width:'100%',marginTop:6},disabled:busy,onClick:doPick},rec?'Re-take photo':'📷 Take book photo'),
-    canTake&&e('input',{type:'file',accept:'image/*',capture:'environment',style:{display:'none'},ref:fileRef,onChange:onFile})
+    canTake&&e('button',{className:'btn-g',style:{width:'100%',marginTop:6},disabled:busy,onClick:doPick},rec?'Replace photo':'📷 Add book photo'),
+    /* v4.6.51 — `capture:'environment'` forced the camera and hid the gallery, so
+       a photo already taken on the phone could not be used. Dropping the
+       attribute lets the OS offer camera OR gallery; taking one there and then
+       still works exactly as before. */
+    canTake&&e('input',{type:'file',accept:'image/*',style:{display:'none'},ref:fileRef,onChange:onFile})
   );
 }
 /* ════════════════════════
@@ -5846,7 +5865,7 @@ function JobCrewPanel({job,setJob,role,crewList,addCrew}){
   const onJobIds=job.crew||[];
   const onJob=onJobIds.map(id=>(crewList||[]).find(c=>c.id===id)).filter(Boolean);
   const qq=q.trim().toLowerCase();
-  const avail=(crewList||[]).filter(c=>!onJobIds.includes(c.id)&&(!qq||(c.name||'').toLowerCase().includes(qq)));
+  const avail=(crewList||[]).filter(c=>!onJobIds.includes(c.id)&&isActiveCrew(c)&&(!qq||(c.name||'').toLowerCase().includes(qq))); /* v4.6.51 — active only */
   const addExisting=c=>{
     if(onJobIds.includes(c.id))return;
     /* v4.6.6 sticky worker settings + role snapshot, same seed as job creation so pay
@@ -6659,7 +6678,8 @@ function NewJobModal({onClose,onCreate,farmList,crewList,addFarm,addCrew,jobs}){
 
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
   const crewByRole=ROLE_ORDER.reduce((acc,r)=>{
-    const members=crewList.filter(c=>c.role===r);
+    /* v4.6.51 — inactive crew are off-season and must not appear when crewing up */
+    const members=crewList.filter(c=>c.role===r&&isActiveCrew(c));
     if(members.length)acc.push({role:r,members});
     return acc;
   },[]);
@@ -6853,7 +6873,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const tog=id=>setSelCrew(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const handleAddCrew=c=>{addCrew(c);setSelCrew(p=>[...p,c.id]);setShowAddCrew(false);};
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
-  const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=(crewList||[]).filter(c=>c.role===r);if(members.length)acc.push({role:r,members});return acc;},[]);
+  const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=(crewList||[]).filter(c=>c.role===r&&isActiveCrew(c));if(members.length)acc.push({role:r,members});return acc;},[]); /* v4.6.51 — active only */
 
   const vf=farmQuery?farmList.filter(f=>f.name.toLowerCase().includes(farmQuery)||f.address.toLowerCase().includes(farmQuery)):farmList;
 
@@ -7706,6 +7726,7 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
   const [editCrew,setEditCrew]=useState(null);
   const [confirmDeleteFarm,setConfirmDeleteFarm]=useState(null);
   const [confirmDeleteCrew,setConfirmDeleteCrew]=useState(null);
+  const [deleteBlocked,setDeleteBlocked]=useState(null); /* v4.6.51 */
 
   const handleSaveFarm=f=>{
     const idx=FARMS.findIndex(x=>x.id===f.id);
@@ -7725,14 +7746,43 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
     setFarmList(p=>{const n=p.filter(f=>f.id!==id);syncLookups(n,CREW);return n;});
     dbDeleteFarm(id);setConfirmDeleteFarm(null);
   };
-  const handleDeleteCrew=id=>{
+  /* v4.6.51 — set a crew member active or inactive. The record and all their
+     tally history stay exactly where they are; only their visibility in the
+     pickers changes. */
+  const setCrewActive=(c,active)=>{
+    const next={...c}; if(active)delete next.active; else next.active=false;
+    setCrewList(p=>{const n=p.map(x=>x.id===c.id?next:x);syncLookups(FARMS,n);return n;});
+    dbSaveCrew(next).catch(()=>{});
+  };
+  /* v4.6.51 — a hard delete orphans every tally row the person has, which is how
+     thousands of head went unattributed and someone went unpaid. Check first;
+     if they have recorded work, refuse and point at Inactive instead. The check
+     is one query and only runs when someone actually presses delete. */
+  const handleDeleteCrew=async id=>{
+    try{
+      const r=await withTimeout(
+        sb.from('tally_entries').select('crew_id')
+          .eq('contractor_slug',CONTRACTOR_SLUG).eq('crew_id',id).limit(1),
+        6000,'crew_delete_check_timeout');
+      if(r&&!r.error&&Array.isArray(r.data)&&r.data.length>0){
+        setConfirmDeleteCrew(null);
+        setDeleteBlocked(id);
+        return;
+      }
+    }catch(ex){
+      /* Could not check — refuse rather than risk orphaning history. */
+      setConfirmDeleteCrew(null); setDeleteBlocked(id); return;
+    }
     setCrewList(p=>{const n=p.filter(c=>c.id!==id);syncLookups(FARMS,n);return n;});
     dbDeleteCrew(id); /* v4.6.11a */
     setConfirmDeleteCrew(null);
   };
 
   const ROLE_ORDER=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner'];
-  const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=crewList.filter(c=>c.role===r);if(members.length)acc.push({role:r,members});return acc;},[]);
+  /* v4.6.51 — the database is the one place inactive crew stay visible, so they
+     can be brought back. Pickers elsewhere show active only. */
+  const crewByRole=ROLE_ORDER.reduce((acc,r)=>{const members=crewList.filter(c=>c.role===r&&isActiveCrew(c));if(members.length)acc.push({role:r,members});return acc;},[]);
+  const inactiveCrew=crewList.filter(c=>!isActiveCrew(c));
 
   return e('div',{style:{position:'fixed',inset:0,background:'var(--bg)',zIndex:200,display:'flex',flexDirection:'column'}},
     e('div',{style:{background:'var(--hdr)',padding:'16px',display:'flex',alignItems:'center',gap:12,position:'sticky',top:0,zIndex:10}},
@@ -7808,8 +7858,14 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
                 ,
                   e(CrewPinRow,{c:c,onSave:handleSaveCrew}) /* v4.6.12 */
                 ),
-                e('div',{style:{display:'flex',gap:8}},
+                e('div',{style:{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end'}},
                   e('button',{onClick:()=>{setEditCrew(c.id);setConfirmDeleteCrew(null);},style:{background:'rgba(245,158,11,.15)',border:'1px solid rgba(245,158,11,.3)',borderRadius:7,padding:'6px 10px',color:'var(--amber)',fontWeight:700,fontSize:12,cursor:'pointer'}},'✏️ Edit'),
+                  /* v4.6.51 — the off-season switch. Keeps the person and every
+                     tally they have; just takes them out of the pickers. */
+                  e('button',{onClick:()=>setCrewActive(c,false),style:{background:'var(--card2)',border:'1px solid var(--border)',borderRadius:7,padding:'6px 10px',color:'var(--muted)',fontWeight:700,fontSize:12,cursor:'pointer'}},'Make inactive'),
+                  deleteBlocked===c.id&&e('div',{style:{fontSize:11.5,color:'var(--amber)',maxWidth:210,lineHeight:1.4,textAlign:'right'}},
+                    c.name+' has tallies recorded, so deleting would orphan that work and break past pay summaries. Use Make inactive instead.',
+                    e('button',{onClick:()=>setDeleteBlocked(null),style:{display:'block',marginLeft:'auto',marginTop:4,background:'none',border:'none',color:'var(--dim)',fontSize:11,cursor:'pointer',textDecoration:'underline'}},'dismiss')),
                   confirmDeleteCrew===c.id
                     ?e('div',{style:{display:'flex',gap:6,alignItems:'center'}},
                         e('span',{style:{fontSize:12,color:'#ef4444',fontWeight:600}},'Sure?'),
@@ -7820,7 +7876,26 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
                 )
               )
           ))
-        ))
+        )),
+        /* v4.6.51 — inactive crew live here and nowhere else. Reactivating brings
+           back the SAME person, same id, history intact — which also stops a lead
+           creating a second record because the original was not in the list. */
+        inactiveCrew.length>0&&e('div',{style:{marginTop:22}},
+          e('div',{style:{fontFamily:'var(--h)',fontSize:13,fontWeight:700,letterSpacing:1,
+            textTransform:'uppercase',color:'var(--dim)',marginBottom:4}},'Inactive \u00b7 '+inactiveCrew.length),
+          e('div',{style:{fontSize:11.5,color:'var(--dim)',marginBottom:10,lineHeight:1.45}},
+            'Off the crew pickers, but every tally they have is kept. Bring them back next season and they return as the same person.'),
+          inactiveCrew.map(c=>e('div',{key:c.id,style:{background:'var(--card)',borderRadius:12,
+              padding:'12px 14px',marginBottom:8,border:'1px solid var(--border)',opacity:.72,
+              display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}},
+            e('div',null,
+              e('div',{style:{fontWeight:700,fontSize:15}},c.name),
+              e('div',{style:{fontSize:12,color:'var(--muted)',marginTop:2}},c.role+(c.phone?' \u00b7 '+c.phone:''))),
+            e('button',{onClick:()=>setCrewActive(c,true),
+              style:{background:'rgba(34,197,94,.15)',border:'1px solid rgba(34,197,94,.35)',
+                borderRadius:7,padding:'6px 12px',color:'#22c55e',fontWeight:700,fontSize:12,
+                cursor:'pointer',flexShrink:0}},'Reactivate')))
+        )
       )
     )
   );
