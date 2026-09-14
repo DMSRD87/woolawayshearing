@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.51';
+const APP_VERSION='v4.6.52';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -5855,11 +5855,29 @@ function EditFarmModal({farm,onSave,onClose}){
    This panel is lead+admin, ADD ONLY: removing a worker can strip pay history, so that
    stays admin. New workers created here go to the contractor roster exactly as they do
    from the job-creation form (auto-assigned PIN and all). */
+/* ══ v4.6.52 — THE CREW ON A JOB IS NOW EDITABLE ══════════════════════════════
+   This panel could only ADD. That produced two live problems:
+
+   1. A person's role is snapshotted into the job's own crewDetails when they are
+      added, and changing their role in the database never touches jobs that
+      already exist. That snapshot is deliberate and must stay — one contractor
+      has a wool handler who presses on eight jobs and classes on five — but it
+      was invisible and uneditable, so a shearer moved to penner kept turning up
+      on the stand with no way to correct it.
+
+   2. Someone added by mistake could not be taken off. A rousie who pulled out
+      stayed on the job card and on the pay summary at zero runs.
+
+   Removing is allowed only when the person has NO recorded work on the job. With
+   work, it refuses and says so — silently dropping someone off a crew list is
+   exactly how a wool handler went unpaid for five runs. */
 function JobCrewPanel({job,setJob,role,crewList,addCrew}){
   const [open,setOpen]=useState(false);
   const [q,setQ]=useState('');
   const [showNew,setShowNew]=useState(false);
   const [justAdded,setJustAdded]=useState('');
+  const [busyId,setBusyId]=useState('');
+  const [blocked,setBlocked]=useState(null);   /* {id,name,rows} */
   const canAdd=role==='admin'||role==='shed_lead';
   if(!canAdd)return null;
   const onJobIds=job.crew||[];
@@ -5879,12 +5897,92 @@ function JobCrewPanel({job,setJob,role,crewList,addCrew}){
     setJustAdded(c.name);setQ('');
   };
   const handleNew=async c=>{await addCrew(c);setShowNew(false);addExisting(c);};
+
+  /* Change the role for THIS JOB only. The person's database record and every
+     other job are untouched. */
+  const setJobRole=(c,newRole)=>{
+    const prev=getJobRole(job,c.id)||c.role||'?';
+    if(newRole===prev)return;
+    const det={...(((job.rates||{}).crewDetails||{})[c.id]||{}),role:newRole};
+    const next={...job,rates:{...(job.rates||{}),
+      crewDetails:{...((job.rates||{}).crewDetails||{}),[c.id]:det}}};
+    setJob(()=>next);
+    logJobEvent(job.id,'crew_role_changed',(c.name||c.id)+': '+prev+' \u2192 '+newRole,role);
+    dbSaveJob(next).catch(()=>{});
+  };
+
+  /* Remove from THIS JOB only — never from the database. Refuses if they have
+     tallies here, and refuses if the check cannot run, rather than risk
+     orphaning recorded work. */
+  const removeFromJob=async c=>{
+    setBusyId(c.id); setBlocked(null);
+    try{
+      const r=await withTimeout(
+        sb.from('tally_entries').select('crew_id')
+          .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id)
+          .eq('crew_id',c.id).limit(1),
+        6000,'crew_remove_check_timeout');
+      if(!r||r.error||!Array.isArray(r.data))throw new Error('check failed');
+      if(r.data.length>0){ setBlocked({id:c.id,name:c.name}); setBusyId(''); return; }
+    }catch(ex){ setBlocked({id:c.id,name:c.name,offline:true}); setBusyId(''); return; }
+    const cd={...((job.rates||{}).crewDetails||{})};
+    delete cd[c.id];   /* drop the role snapshot too, or a stale role reappears
+                          if they are ever added back */
+    const next={...job,crew:(job.crew||[]).filter(x=>x!==c.id),
+      rates:{...(job.rates||{}),crewDetails:cd},
+      leadId:(job.leadId===c.id?null:job.leadId)};
+    setJob(()=>next);
+    logJobEvent(job.id,'crew_removed',(c.name||c.id),role);
+    dbSaveJob(next).catch(()=>{});
+    setBusyId('');
+  };
+  const ROLES=['Shearer','Crutcher','Wool Handler','Wool Classer','Presser','Penner','Cook'];
   return e('div',{className:'card',style:{margin:'0 16px 12px'}},
     e('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between'}},
       e('div',{style:{fontWeight:800,fontSize:14}},'Crew on this job ('+onJob.length+')'),
       e('button',{onClick:()=>{setOpen(o=>!o);setJustAdded('');},style:{background:'rgba(245,158,11,.15)',border:'1px solid rgba(245,158,11,.3)',borderRadius:7,padding:'6px 10px',color:'var(--amber)',fontWeight:700,fontSize:12,cursor:'pointer'}},open?'Close':'+ Add crew')
     ),
     justAdded&&e('div',{style:{marginTop:8,fontSize:13,color:'var(--green,#22c55e)',fontWeight:600}},'✓ '+justAdded+' added to this job.'),
+
+    /* v4.6.52 — who is actually on the job, with their role for THIS job and a
+       way off it. The role shows "usually X" whenever it differs from their
+       database role, so an override is visible rather than buried. */
+    onJob.length>0&&e('div',{style:{marginTop:10}},
+      onJob.map(c=>{
+        const jr=getJobRole(job,c.id)||c.role||'?';
+        const differs=(c.role&&jr!==c.role);
+        const isLead=job.leadId===c.id;
+        return e('div',{key:c.id,style:{display:'flex',alignItems:'center',gap:8,
+            padding:'8px 0',borderTop:'1px solid var(--border)',flexWrap:'wrap'}},
+          e('div',{style:{flex:1,minWidth:120}},
+            e('div',{style:{fontWeight:700,fontSize:14}},c.name,
+              isLead&&e('span',{style:{marginLeft:6,fontSize:10,fontWeight:800,
+                color:'var(--amber)',letterSpacing:.5}},'LEAD')),
+            differs&&e('div',{style:{fontSize:11,color:'var(--dim)'}},'usually '+c.role)),
+          e('select',{className:'if-sel',value:jr,disabled:busyId===c.id,
+            onChange:ev=>setJobRole(c,ev.target.value),
+            style:{width:'auto',minWidth:124,fontSize:12,padding:'5px 8px'}},
+            ROLES.indexOf(jr)<0&&e('option',{value:jr},jr),
+            ROLES.map(r=>e('option',{key:r,value:r},r))),
+          e('button',{disabled:busyId===c.id,onClick:()=>removeFromJob(c),
+            title:'Remove from this job only',
+            style:{background:'rgba(239,68,68,.12)',border:'1px solid rgba(239,68,68,.3)',
+              borderRadius:7,padding:'5px 9px',color:'#ef4444',fontWeight:700,
+              fontSize:12,cursor:busyId===c.id?'wait':'pointer'}},
+            busyId===c.id?'…':'Remove'),
+          blocked&&blocked.id===c.id&&e('div',{style:{flexBasis:'100%',fontSize:11.5,
+              color:'var(--amber)',lineHeight:1.45,paddingTop:2}},
+            blocked.offline
+              ?'Could not check whether '+c.name+' has tallies on this job, so nothing was changed. Try again with signal.'
+              :c.name+' has tallies recorded on this job. Removing them would hide that work from the pay summary — clear their entries first, or leave them on.',
+            e('button',{onClick:()=>setBlocked(null),style:{marginLeft:6,background:'none',
+              border:'none',color:'var(--dim)',fontSize:11,cursor:'pointer',
+              textDecoration:'underline'}},'dismiss'))
+        );
+      }),
+      e('div',{style:{fontSize:11,color:'var(--dim)',marginTop:8,lineHeight:1.45}},
+        'Role changes here apply to this job only \u2014 the crew member\'s record and other jobs are unchanged.')
+    ),
     open&&e('div',{style:{marginTop:10}},
       e('input',{type:'text',className:'fi',placeholder:'Search crew…',value:q,onChange:ev=>setQ(ev.target.value),style:{marginBottom:8}}),
       avail.length===0&&e('div',{style:{color:'var(--muted)',fontSize:13,padding:'6px 0'}},qq?'No one matching — try + New crew member.':'Everyone on the roster is already on this job.'),
@@ -7727,6 +7825,7 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
   const [confirmDeleteFarm,setConfirmDeleteFarm]=useState(null);
   const [confirmDeleteCrew,setConfirmDeleteCrew]=useState(null);
   const [deleteBlocked,setDeleteBlocked]=useState(null); /* v4.6.51 */
+  const [roleSpread,setRoleSpread]=useState(null);        /* v4.6.52 */
 
   const handleSaveFarm=f=>{
     const idx=FARMS.findIndex(x=>x.id===f.id);
@@ -7736,11 +7835,40 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
     setEditFarm(null);setShowAddFarm(false);
   };
   const handleSaveCrew=c=>{
+    /* v4.6.52 — a job snapshots a person's role into its own crewDetails when
+       they are added, so changing the role here does NOT touch jobs that already
+       exist. That is deliberate (a wool handler who presses on some jobs must
+       keep doing so), but it left a shearer moved to penner still on the stand
+       with nothing explaining why. Detect it and offer to apply the change to
+       ACTIVE jobs only — Completed and Charged Out are history and stay put. */
+    const before=CREW.find(x=>x.id===c.id);
+    const roleChanged=!!before&&before.role&&c.role&&before.role!==c.role;
     const idx=CREW.findIndex(x=>x.id===c.id);
     if(idx>=0)CREW.splice(idx,1,c);else CREW.push(c);
     setCrewList(p=>{const n=p.find(x=>x.id===c.id)?p.map(x=>x.id===c.id?c:x):[...p,c];syncLookups(FARMS,n);return n;});
     dbSaveCrew(c).catch(()=>{});
     setEditCrew(null);
+    if(roleChanged){
+      const affected=(JOBS_LU||[]).filter(j=>j&&j.status==='Active'
+        &&(j.crew||[]).indexOf(c.id)>=0
+        &&(getJobRole(j,c.id)||'')===before.role);
+      if(affected.length>0)setRoleSpread({crew:c,from:before.role,to:c.role,jobs:affected});
+    }
+  };
+  /* Apply the new role to the active jobs that still carry the old one. */
+  const applyRoleSpread=async()=>{
+    const sp=roleSpread; if(!sp)return;
+    setRoleSpread(null);
+    for(const j of sp.jobs){
+      const det={...(((j.rates||{}).crewDetails||{})[sp.crew.id]||{}),role:sp.to};
+      const next={...j,rates:{...(j.rates||{}),
+        crewDetails:{...((j.rates||{}).crewDetails||{}),[sp.crew.id]:det}}};
+      const k=(JOBS_LU||[]).findIndex(x=>x&&x.id===j.id);
+      if(k>=0)JOBS_LU.splice(k,1,next);
+      logJobEvent(j.id,'crew_role_changed',
+        (sp.crew.name||sp.crew.id)+': '+sp.from+' \u2192 '+sp.to+' (applied from database)','admin');
+      await dbSaveJob(next).catch(()=>{});
+    }
   };
   const handleDeleteFarm=id=>{
     setFarmList(p=>{const n=p.filter(f=>f.id!==id);syncLookups(n,CREW);return n;});
@@ -7880,6 +8008,25 @@ function DatabaseScreen({farmList,crewList,addFarm,addCrew,onClose,setFarmList,s
         /* v4.6.51 — inactive crew live here and nowhere else. Reactivating brings
            back the SAME person, same id, history intact — which also stops a lead
            creating a second record because the original was not in the list. */
+        /* v4.6.52 — the prompt that closes the gap between the database role and
+           the jobs already carrying the old one. */
+        roleSpread&&e('div',{style:{marginTop:14,padding:'12px 14px',borderRadius:10,
+            background:'rgba(245,158,11,.12)',border:'1px solid var(--amber)'}},
+          e('div',{style:{fontSize:13,fontWeight:700,color:'var(--amber)',marginBottom:4}},
+            roleSpread.crew.name+' is now a '+roleSpread.to),
+          e('div',{style:{fontSize:12,color:'var(--muted)',lineHeight:1.5,marginBottom:10}},
+            roleSpread.jobs.length+' active job'+(roleSpread.jobs.length>1?'s':'')
+            +' still ha'+(roleSpread.jobs.length>1?'ve':'s')+' them as '+roleSpread.from
+            +'. Apply the new role to those too? Completed and charged-out jobs are left alone.'),
+          e('div',{style:{fontSize:11,color:'var(--dim)',marginBottom:10}},
+            roleSpread.jobs.map(j=>j.jobNumber).join(', ')),
+          e('div',{style:{display:'flex',gap:8}},
+            e('button',{onClick:applyRoleSpread,style:{background:'var(--amber)',border:'none',
+              borderRadius:7,padding:'8px 14px',color:'#141414',fontWeight:800,fontSize:12.5,
+              cursor:'pointer'}},'Apply to '+roleSpread.jobs.length+' job'+(roleSpread.jobs.length>1?'s':'')),
+            e('button',{onClick:()=>setRoleSpread(null),style:{background:'var(--card2)',
+              border:'1px solid var(--border)',borderRadius:7,padding:'8px 14px',
+              color:'var(--muted)',fontWeight:700,fontSize:12.5,cursor:'pointer'}},'Leave them'))),
         inactiveCrew.length>0&&e('div',{style:{marginTop:22}},
           e('div',{style:{fontFamily:'var(--h)',fontSize:13,fontWeight:700,letterSpacing:1,
             textTransform:'uppercase',color:'var(--dim)',marginBottom:4}},'Inactive \u00b7 '+inactiveCrew.length),
