@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.48';
+const APP_VERSION='v4.6.50';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -1494,6 +1494,28 @@ function withTimeout(promise,ms,label,ctrl){
 /* logSaveFailure — best-effort forensic insert. Captures save failures so
    we can investigate later. The log call itself has its OWN short timeout
    and any failure is swallowed — logging must NEVER affect the save flow. */
+/* ══ v4.6.50 — JOB EVENT LOG ══════════════════════════════════════════════════
+   Append-only record of what happened to a job: broadcasts and job cards sent,
+   crew added or removed, status changes. Until now these left no trace —
+   broadcasts were a bare POST, and crew or status changes could only be
+   reconstructed by diffing job_snapshots afterwards. A wool handler went unpaid
+   because she silently dropped off a crew list and nothing on the job said so.
+
+   Evidence, not state: nothing reads this back into the app, and the pay engine
+   never touches it. Fire-and-forget, so a failed log never blocks the action it
+   is describing. */
+function logJobEvent(jobId,kind,detail,actorRole){
+  if(!jobId||!kind)return;
+  try{
+    sb.from('job_events').insert({
+      contractor_slug:CONTRACTOR_SLUG,
+      job_id:jobId,
+      kind:String(kind).slice(0,40),
+      actor_role:actorRole||null,
+      detail:(detail==null?null:String(detail).slice(0,500))
+    }).then(()=>{},()=>{});
+  }catch(e){}
+}
 function logSaveFailure(reason,jobId,details){
   /* v4.6.16d - DIAGNOSTIC GATE. The diag_* reasons were added during the sync
      incidents and did their job. Left on, they wrote ~1,600 rows a day across
@@ -5269,7 +5291,10 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
         e('div',{className:'draft-banner-t'},'Draft — not yet sent'),
         e('div',{className:'draft-banner-s'},'Publish activates the job and opens Send Cards. Draft crew never receive SMS.')
       ),
-      e('button',{className:'draft-publish-btn',onClick:onPublish},'🚀 Publish')
+      e('button',{className:'draft-publish-btn',onClick:()=>onPublish(false)},'🚀 Publish'),
+      (job.crew||[]).length>0&&e('button',{className:'draft-publish-btn',
+        style:{marginLeft:8,background:'linear-gradient(135deg,#0e7490,#155e75)'},
+        onClick:()=>onPublish(true)},'🚀 Publish & send to crew')
     ),
     /* JOB DETAILS */
     e('div',{className:'admin-section'},
@@ -5830,6 +5855,7 @@ function JobCrewPanel({job,setJob,role,crewList,addCrew}){
     const next={...job,crew:[...onJobIds,c.id],
       rates:{...(job.rates||{}),crewDetails:{...((job.rates||{}).crewDetails||{}),[c.id]:det}}};
     setJob(()=>next);
+    logJobEvent(job.id,'crew_added',(c.name||c.id)+' ('+(c.role||'?')+')',role);
     dbSaveJob(next).catch(()=>{}); /* persist now — do not wait for a navigation event */
     setJustAdded(c.name);setQ('');
   };
@@ -5921,7 +5947,8 @@ function OverviewTab({job,role,onSend,onBroadcast,canSend,onEditFarm,isDraft,onP
     })(),
     /* Draft → show Publish button instead of Send */
     isDraft&&role==='admin'&&onPublish&&e('div',{className:'send-bar'},
-      e('button',{className:'send-btn',onClick:onPublish,style:{background:'linear-gradient(135deg,#dc2626,#991b1b)',boxShadow:'0 4px 16px rgba(220,38,38,.3)'}},'🚀 Publish Job & Send Cards to Crew')
+      e('button',{className:'send-btn',onClick:()=>onPublish(false),style:{background:'linear-gradient(135deg,#475569,#334155)',marginBottom:8}},'🚀 Publish'),
+      (job.crew||[]).length>0&&e('button',{className:'send-btn',onClick:()=>onPublish(true),style:{background:'linear-gradient(135deg,#dc2626,#991b1b)',boxShadow:'0 4px 16px rgba(220,38,38,.3)'}},'🚀 Publish & send cards to crew')
     ),
     /* SEND JOB CARDS — overview tab only (not shown for drafts) */
     canSend&&e('div',{className:'send-bar'},
@@ -5932,6 +5959,74 @@ function OverviewTab({job,role,onSend,onBroadcast,canSend,onEditFarm,isDraft,onP
   );
 }
 /* ── JOB DETAIL ── */
+/* ══ v4.6.50 — JOB LOG ════════════════════════════════════════════════════════
+   What happened to this job and when: broadcasts and cards sent, crew added,
+   status changes, and the save guards firing. Two sources, merged newest-first —
+   job_events (written from v4.6.50 on) and the guard_* rows in save_failures,
+   which already carry a job_id and go back further.
+
+   Read-only by design. It does not PREVENT a bad override; it makes one visible
+   without anyone querying the database. The prevention is getting crew and rates
+   out of the job blob. */
+function JobLogTab({job}){
+  const [rows,setRows]=useState(null);
+  const [err,setErr]=useState('');
+  useEffect(()=>{
+    let dead=false;
+    (async()=>{
+      try{
+        const [ev,gu]=await Promise.all([
+          withTimeout(sb.from('job_events')
+            .select('occurred_at,kind,actor_role,detail')
+            .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id)
+            .order('occurred_at',{ascending:false}).limit(200),8000,'joblog_timeout'),
+          withTimeout(sb.from('save_failures')
+            .select('occurred_at,reason,details')
+            .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id)
+            .like('reason','guard_%')
+            .order('occurred_at',{ascending:false}).limit(100),8000,'joblog_timeout')
+        ]);
+        if(dead)return;
+        const a=(((ev||{}).data)||[]).map(r=>({at:r.occurred_at,kind:r.kind,
+          who:r.actor_role,detail:r.detail,guard:false}));
+        const b=(((gu||{}).data)||[]).map(r=>({at:r.occurred_at,kind:r.reason,
+          who:null,detail:(typeof r.details==='string'?r.details:JSON.stringify(r.details||'')),guard:true}));
+        setRows(a.concat(b).sort((x,y)=>String(y.at).localeCompare(String(x.at))));
+      }catch(ex){ if(!dead)setErr(ex.message==='joblog_timeout'?'Timed out — pull to refresh':'Could not load the log'); }
+    })();
+    return ()=>{dead=true;};
+  },[job.id]);
+
+  const LABEL={published:'Published',crew_added:'Crew added',status_changed:'Status changed',
+    broadcast_sent:'Broadcast sent',job_card_sent:'Job card sent',farmer_sms_sent:'Farmer text sent',
+    guard_crew_restored:'Guard: crew restored',guard_status_kept:'Guard: status kept',
+    guard_rates_kept:'Guard: rates kept',guard_mobrate_kept:'Guard: mob rate kept'};
+  const fmt=at=>{const d=new Date(at);return isNaN(d)?String(at):
+    d.toLocaleDateString('en-AU',{day:'2-digit',month:'short'})+' '+
+    d.toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});};
+
+  if(err)return e('div',{style:{padding:'22px 16px',color:'var(--red)',fontSize:13}},err);
+  if(!rows)return e('div',{style:{padding:'26px 16px',textAlign:'center',color:'var(--muted)'}},'Loading\u2026');
+  if(rows.length===0)return e('div',{style:{padding:'26px 16px',textAlign:'center',color:'var(--muted)',fontSize:13,lineHeight:1.5}},
+    'Nothing logged for this job yet. Broadcasts, job cards, crew changes and status changes are recorded from here on.');
+
+  return e('div',{style:{padding:'10px 16px 24px'}},
+    rows.map((r,i)=>e('div',{key:i,style:{display:'flex',gap:10,padding:'9px 0',
+        borderTop:i?'1px solid var(--border)':'none'}},
+      e('div',{style:{width:74,flexShrink:0,fontSize:11,color:'var(--dim)',
+        fontVariantNumeric:'tabular-nums',paddingTop:2}},fmt(r.at)),
+      e('div',{style:{flex:1,minWidth:0}},
+        e('div',{style:{fontSize:13,fontWeight:700,
+            color:r.guard?'var(--amber)':'var(--text)'}},
+          LABEL[r.kind]||r.kind),
+        r.detail&&e('div',{style:{fontSize:11.5,color:'var(--muted)',
+          wordBreak:'break-word',lineHeight:1.4,marginTop:1}},r.detail),
+        r.who&&e('div',{style:{fontSize:10.5,color:'var(--dim)',marginTop:1}},'by '+r.who)))),
+    e('div',{style:{fontSize:11,color:'var(--dim)',marginTop:14,lineHeight:1.5}},
+      'Amber entries are the save guards catching a stale device. '
+      +'Events are recorded from v4.6.50 onward; guard entries go back further.')
+  );
+}
 function JobDetailScreen({job,setJob,role,setRole,stale,onBack,onSend,onBroadcast,onEdit,onDeleteJob,onPublish,initialTab,crewList,addCrew}){
   const [tab,setTab]=useState(initialTab||'tallies');
   const [showEditFarm,setShowEditFarm]=useState(false);
@@ -5950,7 +6045,12 @@ function JobDetailScreen({job,setJob,role,setRole,stale,onBack,onSend,onBroadcas
   /* Draft is out of the cycle — Draft → Active only via explicit Publish action */
   const cycleStatus=()=>setJob(prev=>{
     if(prev.status==='Draft')return prev; /* guard — Publish button does this */
-    return {...prev,status:STATUS_SEQ[(STATUS_SEQ.indexOf(prev.status)+1)%STATUS_SEQ.length]};
+    const next=STATUS_SEQ[(STATUS_SEQ.indexOf(prev.status)+1)%STATUS_SEQ.length];
+    /* v4.6.50 — Charged Out is an invoicing state one tap from Completed. Record
+       who moved it and when, so a job that turns up invoiced with the wrong day
+       in it can be traced without diffing snapshots. */
+    logJobEvent(prev.id,'status_changed',prev.status+' \u2192 '+next,role);
+    return {...prev,status:next};
   });
   const isDraft=job.status==='Draft';
   /* v4.6.10 - whiteboard unread badge (per-device seen; opening the tab marks seen) */
@@ -5965,7 +6065,10 @@ function JobDetailScreen({job,setJob,role,setRole,stale,onBack,onSend,onBroadcas
     try{const m=lsGet(LS_WB_SEEN)||{};m[job.id]=new Date().toISOString();lsSet(LS_WB_SEEN,m);}catch(err){}
     setWbCount(0);
   },[tab,job.id]);
-  const tabs=[['tallies','Tallies'],['progress','Progress'],['overview','Overview'],['whiteboard','📋'],['summary','Summary']];
+  /* v4.6.50 — Log tab, admin only. It is a record, not a control: nothing here
+     writes back and the pay engine never reads it. */
+  const tabs=[['tallies','Tallies'],['progress','Progress'],['overview','Overview'],['whiteboard','📋'],['summary','Summary']]
+    .concat(role==='admin'?[['log','Log']]:[]);
   if(role==='admin')tabs.push(['admin','Admin']);
   const canSend=(role==='admin'||role==='shed_lead')&&job.status!=='Completed'&&job.status!=='Charged Out'&&!isDraft;
   return e('div',null,
@@ -6000,12 +6103,16 @@ function JobDetailScreen({job,setJob,role,setRole,stale,onBack,onSend,onBroadcas
           e('div',{className:'draft-banner-t'},'This job is a draft'),
           e('div',{className:'draft-banner-s'},'Crew have NOT been notified. Publish to activate the job and send job cards.')
         ),
-        e('button',{className:'draft-publish-btn',onClick:onPublish},'🚀 Publish')
+        e('button',{className:'draft-publish-btn',onClick:()=>onPublish(false)},'🚀 Publish'),
+      (job.crew||[]).length>0&&e('button',{className:'draft-publish-btn',
+        style:{marginLeft:8,background:'linear-gradient(135deg,#0e7490,#155e75)'},
+        onClick:()=>onPublish(true)},'🚀 Publish & send to crew')
       ),
       e('div',{className:'tabs'},tabs.map(([k,l])=>e('button',{key:k,className:`tab-btn${tab===k?' on':''}`,onClick:()=>setTab(k)},
         (k==='whiteboard'&&wbCount>0)?e('span',null,l,e('span',{style:{marginLeft:4,background:'#e53e3e',color:'#fff',borderRadius:10,fontSize:'10px',padding:'1px 6px',fontWeight:800,verticalAlign:'middle'}},wbCount>9?'9+':wbCount)):l))),
       tab==='tallies'&&e(TallyTab,{job,setJob,role,viewDate,setViewDate}),
       tab==='progress'&&e(ProgressTab,{job}),
+      tab==='log'&&role==='admin'&&e(JobLogTab,{job}),
       tab==='overview'&&e(OverviewTab,{job,role,onSend,onBroadcast,canSend,onEditFarm:role==='admin'?()=>setShowEditFarm(true):null,isDraft,onPublish,setJob,crewList,addCrew}), /* v4.6.13 - crew panel needs roster + writer */
       tab==='whiteboard'&&e(WhiteboardTab,{job,role}),
       tab==='summary'&&e(SummaryTab,{job,setJob,role}),
@@ -6067,6 +6174,10 @@ function BroadcastModal({job,onClose,farmList,crewList}){
       const data=await res.json();
       setSentCount(data.sent||0);
       setStatus(data.failed>0?'partial':'done');
+      /* v4.6.50 — a broadcast left no trace at all before this. */
+      logJobEvent(job&&job.id,'broadcast_sent',
+        'to='+messages.length+'; sent='+(data.sent||0)+'; failed='+(data.failed||0)
+        +'; body="'+String(body||'').slice(0,120)+'"');
     }catch(e){setStatus('error');}
   };
 
@@ -6217,6 +6328,7 @@ function CrewSMSRow({id,c,views,status,onPreview,job,farmList,crewList,appUrl}){
     try{
       await fetch('/api/send-sms',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({messages:[{to:c.phone,body:buildJobCardSMS(job,id,farmList,crewList,appUrl)}]})});
+      logJobEvent(job&&job.id,'job_card_sent',(c.name||id));
       setIndivSent(true);
     }catch(e){}
     setIndivSending(false);
@@ -6259,6 +6371,7 @@ function FarmerSMSRow({job,views,onPreview,farmList,appUrl,farmerName,farmerPhon
     try{
       await fetch('/api/send-sms',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({messages:[{to:farmerPhone,body:buildFarmerSMS(job,farmerName||'there',farmerPhone,farmList,appUrl)}]})});
+      logJobEvent(job&&job.id,'farmer_sms_sent',(farmerName||'farmer'));
       setFSent(true);
     }catch(e){}
     setFSending(false);
@@ -8746,15 +8859,21 @@ function App(){
     setScreen('schedule');setSelJobId(null);
   };
   /* Publish a draft: status→Active, save, open Send Cards modal on the job */
-  const publishJob=async()=>{
+  /* v4.6.49 — publishing is now a choice. It used to always open the SMS modal
+     when the job had crew, so a contractor who publishes first and edits after
+     had the send sheet thrown at them every time and had to dismiss it. Two
+     buttons instead: Publish (status only) and Publish & send to crew. The
+     second only appears when there IS crew, so cards can never go to an empty
+     job. Called with no argument it stays status-only, which is the safe
+     default for any caller I have not seen. */
+  const publishJob=async(sendCards)=>{
     if(!selJob)return;
     const updated={...selJob,status:'Active'};
     setJobs(p=>p.map(j=>j.id===updated.id?updated:j));
     await dbSaveJob(updated).catch(()=>{});
-    /* If crew exists, open SMS modal straight away so user can send cards */
-    if(updated.crew&&updated.crew.length>0){
-      setShowSMS(true);
-    }
+    logJobEvent(updated.id,'published',
+      'crew='+((updated.crew||[]).length)+(sendCards===true?'; cards sheet opened':''),role);
+    if(sendCards===true&&updated.crew&&updated.crew.length>0)setShowSMS(true);
   };
 
   /* v4.6.3d: access gate before anything else. Shows while we're still checking
