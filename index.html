@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.52';
+const APP_VERSION='v4.6.53';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -1907,7 +1907,15 @@ async function dbSaveJob(job){
             logSaveFailure('guard_mobrate_kept',job.id,restored.join(','));
           }
           if(trace.length>0){
-            logSaveFailure('mobrate_trace',job.id,trace.join(' | ').slice(0,480));
+            /* v4.6.53 — was 'mobrate_trace', which escaped the DIAG_TELEMETRY gate
+               because that gate only matches /^diag_/. It fires on every mob-rate
+               comparison INCLUDING legitimate edits, so it wrote ~80 rows a week
+               across four contractors into production telemetry — the same
+               pattern that once grew save_failures to 54 MB and buried 377 real
+               failures in 11,800 rows of noise.
+               Renamed, not removed: flip DIAG_TELEMETRY to re-arm it when chasing
+               a mob-rate bug, which is what the gate exists for. */
+            logSaveFailure('diag_mobrate_trace',job.id,trace.join(' | ').slice(0,480));
           }
         }catch(mrErr){
           logSaveFailure('guard_mobrate_error',job.id,(mrErr&&mrErr.message)||'unknown');
@@ -1981,7 +1989,28 @@ async function dbDeleteJob(jobId){
   /* Clear any pending queued upsert for this job — without this, a queued
      write from before the delete would resurrect the job on next flushQueue. */
   dequeue('job',jobId);
+  /* v4.6.53 — CASCADE THE TALLIES. Deleting a job removed the job row and left
+     its tally_entries pointing at nothing: 383 rows carrying 14,509 head are
+     already stranded that way fleet-wide. They cannot be paid from, invoiced
+     from, or found without a hand-written query, and self-heal will happily
+     rebuild a phantom job out of them.
+
+     Tallies go FIRST. If that fails the job row stays, so the pair can never
+     end up half-deleted — better a job that would not delete than a job that
+     silently shed its head count. The confirm dialog states the number being
+     destroyed before any of this runs. */
+  try{
+    const del=await withTimeout(
+      sb.from('tally_entries').delete()
+        .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',jobId),
+      12000,'job_cascade_timeout');
+    if(del&&del.error)throw new Error(del.error.message||'cascade failed');
+  }catch(ex){
+    logSaveFailure('error','job_delete_cascade',(ex&&ex.message)||'unknown');
+    return false;   /* job row deliberately left in place */
+  }
   try{await sb.from('jobs').delete().eq('id',jobId).eq('contractor_slug',CONTRACTOR_SLUG);}catch(e){}
+  return true;
 }
 async function dbSaveFarm(farm){
   const farms=lsGet(LS_FARMS)||[];
@@ -5224,6 +5253,9 @@ function RCell({lbl,k,draft,onSet,hi,prefix,suffix,step}){
 }
 
 function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
+  /* v4.6.53 — count what the delete will destroy, so the confirm is honest
+     rather than a generic warning. */
+  const [delCounts,setDelCounts]=useState(null);
   const [confirmDelete,setConfirmDelete]=useState(false);
   const [confirmDeleteJob,setConfirmDeleteJob]=useState(false);
   const [saved,setSaved]=useState(false);
@@ -5319,13 +5351,41 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
     e('div',{className:'admin-section'},
       e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Job Details')),
       e('button',{className:'btn-p',onClick:onEdit,style:{width:'100%',marginBottom:8}},'✏️ Edit Job Details'),
-      !confirmDeleteJob&&e('button',{onClick:()=>setConfirmDeleteJob(true),style:{width:'100%',padding:'12px',background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',borderRadius:8,color:'#ef4444',fontWeight:700,fontSize:14,cursor:'pointer'}},'🗑️ Delete This Job'),
+      !confirmDeleteJob&&e('button',{onClick:()=>{
+          setConfirmDeleteJob(true); setDelCounts(null);
+          /* count what will be destroyed — best effort, the dialog says so if it fails */
+          (async()=>{
+            try{
+              const r=await withTimeout(
+                sb.from('tally_entries').select('kind,value')
+                  .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id).limit(5000),
+                8000,'delcount_timeout');
+              if(r&&!r.error&&Array.isArray(r.data)){
+                let head=0,rows=r.data.length;
+                r.data.forEach(x=>{if(x.kind==='count')head+=Number(x.value)||0;});
+                setDelCounts({rows,head});
+              }else setDelCounts({failed:true});
+            }catch(e){setDelCounts({failed:true});}
+          })();
+        },style:{width:'100%',padding:'12px',background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',borderRadius:8,color:'#ef4444',fontWeight:700,fontSize:14,cursor:'pointer'}},'🗑️ Delete This Job'),
       confirmDeleteJob&&e('div',{style:{background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.2)',borderRadius:10,padding:16,marginTop:4}},
         e('div',{style:{fontWeight:700,fontSize:14,marginBottom:6,color:'#ef4444'}},'Delete this job?'),
+        /* v4.6.53 — say what is actually being destroyed. The tallies are now
+           cascaded rather than orphaned, so this is the last chance to see the
+           head count before it goes. */
+        delCounts&&!delCounts.failed&&delCounts.rows>0&&e('div',{style:{fontSize:13,
+            color:'#ef4444',fontWeight:700,marginBottom:8,lineHeight:1.45}},
+          delCounts.head>0
+            ? delCounts.head.toLocaleString()+' head and '+delCounts.rows+' tally entries will be permanently deleted with this job.'
+            : delCounts.rows+' tally entries will be permanently deleted with this job.'),
+        delCounts&&delCounts.failed&&e('div',{style:{fontSize:12.5,color:'var(--amber)',
+          marginBottom:8,lineHeight:1.45}},'Could not check what this job holds \u2014 no signal. Wait until you are connected before deleting.'),
+        !delCounts&&e('div',{style:{fontSize:12.5,color:'var(--dim)',marginBottom:8}},'Checking what this job holds\u2026'),
         e('div',{style:{fontSize:13,color:'var(--muted)',marginBottom:14}},'All tallies, runs and pay data for this job will be permanently deleted.'),
         e('div',{style:{display:'flex',gap:10}},
           e('button',{className:'btn-g',style:{flex:1},onClick:()=>setConfirmDeleteJob(false)},'Cancel'),
-          e('button',{style:{flex:1,padding:'10px',background:'#ef4444',border:'none',borderRadius:8,color:'#fff',fontWeight:700,fontSize:14,cursor:'pointer'},onClick:onDeleteJob},'Yes, Delete Job')
+          e('button',{style:{flex:1,padding:'10px',background:'#ef4444',border:'none',borderRadius:8,color:'#fff',fontWeight:700,fontSize:14,cursor:'pointer'},disabled:!delCounts||delCounts.failed,
+            onClick:onDeleteJob},(!delCounts||delCounts.failed)?'Checking\u2026':'Yes, Delete Job')
         )
       )
     ),
