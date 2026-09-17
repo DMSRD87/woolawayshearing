@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.53';
+const APP_VERSION='v4.6.54';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -5743,8 +5743,32 @@ function ProgressTab({job}){
 }
 /* ── OVERVIEW TAB ── */
 /* ── WHITEBOARD TAB ── */
+/* ══ v4.6.54 — THE WHITEBOARD IS AN INJURY LOG, TREAT IT LIKE ONE ════════════
+   Contractors use this to record RWS animal-welfare incidents — "white tag
+   wether / cut hock / stitched sprayed rattled". It was written as a casual
+   message board and had none of the protections the tally path has:
+
+   1. No timeout on the load. The v4.6.45 abort sweep missed it, same as the
+      access gate did.
+   2. Errors swallowed by an empty catch. A failed query left the list empty and
+      loading false, so a load failure rendered as a BLANK BOARD with nothing
+      saying so — reported live as "the whiteboard is missing" when every entry
+      was sitting safely on the server.
+   3. No local cache, so no signal meant no board at all.
+   4. Worst: doAdd added the entry to the on-screen list even when the insert
+      failed. Someone wrote an injury note, watched it appear, and it never
+      reached the server. For a compliance record that is the worst failure
+      available.
+
+   Now: timeout, cached per job, failures visible, and an unsent note is kept and
+   retried rather than faked. */
 function WhiteboardTab({job,role}){
-  const [entries,setEntries]=useState([]);
+  const LS_WB='mg_wb_'+CONTRACTOR_SLUG+'_';
+  const [entries,setEntries]=useState(()=>{
+    try{return lsGet(LS_WB+job.id)||[];}catch(e){return [];}
+  });
+  const [loadErr,setLoadErr]=useState('');
+  const [addErr,setAddErr]=useState('');
   const [loading,setLoading]=useState(true);
   const [text,setText]=useState('');
   const [authorRole,setAuthorRole]=useState(role==='farmer'?'Farmer':'Shearer'); /* v4.6.11 */
@@ -5752,18 +5776,42 @@ function WhiteboardTab({job,role}){
   const ROLES=['Farmer','Lead','Shearer','Staff'];
 
   const load=async()=>{
+    setLoadErr('');
     try{
-      const {data}=await sb.from('job_whiteboard')
-        .select('*')
-        .eq('job_id',job.id)
-        .eq('contractor_slug',CONTRACTOR_SLUG)
-        .order('created_at',{ascending:false});
-      if(data)setEntries(data);
-    }catch(e){}
+      const r=await withTimeout(
+        sb.from('job_whiteboard').select('*')
+          .eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG)
+          .order('created_at',{ascending:false}),
+        8000,'whiteboard_load_timeout');
+      if(r&&r.error)throw new Error(r.error.message||'load failed');
+      if(r&&Array.isArray(r.data)){
+        /* keep anything still waiting to send, then take the server's list */
+        const pending=(lsGet(LS_WB+job.id)||[]).filter(x=>x&&x._unsent);
+        const merged=pending.concat(r.data.filter(d=>!pending.some(p=>p.id===d.id)));
+        setEntries(merged);
+        lsSet(LS_WB+job.id,merged);
+      }
+    }catch(e){
+      logSaveFailure(e.message==='whiteboard_load_timeout'?'timeout':'error','whiteboard_load',e.message);
+      setLoadErr('cached');   /* the list already holds the cached copy */
+    }
     setLoading(false);
   };
+  /* Retry anything that never made it, whenever the tab is opened. */
+  const flushUnsent=async()=>{
+    const pend=(lsGet(LS_WB+job.id)||[]).filter(x=>x&&x._unsent);
+    if(!pend.length)return;
+    for(const p of pend){
+      const {_unsent,...row}=p;
+      try{
+        const r=await withTimeout(sb.from('job_whiteboard').insert(row),12000,'whiteboard_flush_timeout');
+        if(r&&r.error)throw new Error(r.error.message);
+        setEntries(prev=>{const nx=prev.map(x=>x.id===p.id?row:x);lsSet(LS_WB+job.id,nx);return nx;});
+      }catch(e){ /* stays unsent, tries again next time */ }
+    }
+  };
 
-  useEffect(()=>{load();},[job.id]);
+  useEffect(()=>{load();flushUnsent();},[job.id]);
 
   const doAdd=async()=>{
     if(!text.trim())return;
@@ -5776,11 +5824,21 @@ function WhiteboardTab({job,role}){
       note:text.trim(),
       created_at:new Date().toISOString()
     };
+    setAddErr('');
     try{
-      await sb.from('job_whiteboard').insert(entry);
-      setEntries(p=>[entry,...p]);
+      const r=await withTimeout(sb.from('job_whiteboard').insert(entry),12000,'whiteboard_add_timeout');
+      if(r&&r.error)throw new Error(r.error.message||'insert failed');
+      setEntries(p=>{const nx=[entry,...p];lsSet(LS_WB+job.id,nx);return nx;});
       setText('');
-    }catch(e){}
+    }catch(e){
+      /* v4.6.54 — keep it, mark it unsent, and SAY SO. Never show a note as
+         saved when it is not: this is an injury record. */
+      logSaveFailure(e.message==='whiteboard_add_timeout'?'timeout':'error','whiteboard_add',e.message);
+      const un={...entry,_unsent:true};
+      setEntries(p=>{const nx=[un,...p];lsSet(LS_WB+job.id,nx);return nx;});
+      setText('');
+      setAddErr('Saved on this phone but not sent yet \u2014 it will send when you have signal. Do not clear the app.');
+    }
     setSaving(false);
   };
 
@@ -5799,6 +5857,20 @@ function WhiteboardTab({job,role}){
   const ROLE_COLORS={Farmer:'#0ea5e9',Lead:'var(--amber)',Shearer:'var(--green)',Staff:'#8b5cf6'};
 
   return e('div',{style:{padding:'0 0 100px 0'}},
+    /* v4.6.54 — a failed load must never look like an empty board. */
+    loadErr&&e('div',{style:{margin:'12px 16px 0',padding:'10px 12px',borderRadius:9,
+        background:'rgba(245,158,11,.14)',border:'1px solid var(--amber)',
+        color:'var(--amber)',fontSize:12.5,fontWeight:600,lineHeight:1.45}},
+      entries.length>0
+        ? 'Couldn\'t reach the server \u2014 showing the last copy saved on this phone. Newer notes from others may be missing.'
+        : 'Couldn\'t reach the server and there is no saved copy on this phone, so nothing can be shown. Notes already written are safe on the server \u2014 try again with signal.',
+      e('button',{onClick:()=>{setLoading(true);load();},
+        style:{display:'block',marginTop:6,background:'none',border:'none',padding:0,
+          color:'var(--amber)',fontSize:12,fontWeight:800,cursor:'pointer',
+          textDecoration:'underline'}},'Try again')),
+    addErr&&e('div',{style:{margin:'12px 16px 0',padding:'10px 12px',borderRadius:9,
+        background:'rgba(245,158,11,.14)',border:'1px solid var(--amber)',
+        color:'var(--amber)',fontSize:12.5,fontWeight:600,lineHeight:1.45}},addErr),
     /* Add note box — visible to all roles */
     e('div',{style:{margin:'12px 16px',background:'var(--card)',borderRadius:12,padding:16,border:'1px solid var(--border)'}},
       e('div',{style:{fontFamily:'var(--h)',fontSize:16,fontWeight:800,marginBottom:10}},'📋 Add to Whiteboard'),
@@ -5831,20 +5903,27 @@ function WhiteboardTab({job,role}){
 
     /* Entries */
     loading&&e('div',{style:{textAlign:'center',padding:'40px',color:'var(--muted)'}},'Loading...'),
-    !loading&&entries.length===0&&e('div',{style:{textAlign:'center',padding:'40px 24px',color:'var(--muted)'}},
+    !loading&&entries.length===0&&!loadErr&&e('div',{style:{textAlign:'center',padding:'40px 24px',color:'var(--muted)'}},
       e('div',{style:{fontSize:36,marginBottom:8}},'📋'),
       e('div',{style:{fontWeight:700,marginBottom:4}},'Whiteboard is empty'),
       e('div',{style:{fontSize:13}},'Add notes, observations or instructions above — visible to everyone on this job')
     ),
     !loading&&entries.map(entry=>e('div',{key:entry.id,
       style:{margin:'0 16px 10px',background:'var(--card)',borderRadius:12,padding:14,
-        border:'1px solid var(--border)',borderLeft:'3px solid '+(ROLE_COLORS[entry.author_role]||'var(--border)')}},
+        border:entry._unsent?'1px solid var(--amber)':'1px solid var(--border)',
+        borderLeft:'3px solid '+(entry._unsent?'var(--amber)':(ROLE_COLORS[entry.author_role]||'var(--border)'))}},
       e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}},
         e('div',{style:{display:'flex',alignItems:'center',gap:8}},
           e('span',{style:{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:10,
             background:ROLE_COLORS[entry.author_role]||'var(--muted)',color:'#fff'}},
             entry.author_role),
-          e('span',{style:{fontSize:11,color:'var(--muted)'}},fmtTs(entry.created_at))
+          e('span',{style:{fontSize:11,color:'var(--muted)'}},fmtTs(entry.created_at)),
+          /* v4.6.54 — an unsent note must never look filed. This is an injury
+             record; showing it as saved when it is not is the failure that
+             matters most here. */
+          entry._unsent&&e('span',{style:{fontSize:10,fontWeight:800,padding:'2px 7px',
+            borderRadius:10,background:'var(--amber)',color:'#141414',letterSpacing:.3}},
+            'NOT SENT YET')
         ),
         (role==='admin'||role==='shed_lead')&&e('button',{
           type:'button',
