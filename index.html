@@ -599,7 +599,7 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.54';
+const APP_VERSION='v4.6.55';
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -1246,9 +1246,12 @@ async function dbLoad(){
     const _loadCtrl=(typeof AbortController!=='undefined')?new AbortController():null;
     const _sig=q=>(_loadCtrl&&typeof q.abortSignal==='function')?q.abortSignal(_loadCtrl.signal):q;
     const [jr,fr,cr]=await withTimeout(Promise.all([
-      _sig(sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false})),
-      _sig(sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG)),
-      _sig(sb.from('crew_members').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG)),
+      /* v4.6.55 — explicit ceilings. Unbounded, these would truncate in silence
+         at the server default. The largest contractor is at ~100 jobs so there is
+         headroom, but a silent cap on the CORE load is the worst place for one. */
+      _sig(sb.from('jobs').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).order('updated_at',{ascending:false}).limit(5000)),
+      _sig(sb.from('farms').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).limit(5000)),
+      _sig(sb.from('crew_members').select('id,data').eq('contractor_slug',CONTRACTOR_SLUG).limit(5000)),
     ]),8000,'load_timeout',_loadCtrl);
     /* CRITICAL: if any of the three calls returned an error (or the SW
        offline stub returned fake-200-with-error), DO NOT trust the result.
@@ -1504,6 +1507,48 @@ function withTimeout(promise,ms,label,ctrl){
    Evidence, not state: nothing reads this back into the app, and the pay engine
    never touches it. Fire-and-forget, so a failed log never blocks the action it
    is describing. */
+/* ══ v4.6.55 — NEVER RELY ON THE SERVER'S DEFAULT ROW CAP ════════════════════
+   PostgREST silently truncates any select with no explicit bound. No error, no
+   warning — you just get fewer rows than you asked for.
+
+   Season stats hit it live: the 30-day figure read HIGHER than the whole season,
+   because 30 days fitted under the cap and the season did not. A subset larger
+   than its superset, and every season number quietly short. It gets worse the
+   longer the season runs, which is exactly backwards.
+
+   A sweep found 13 queries depending on that cap. Bumping the limit just moves
+   the cliff, so this pages instead.
+
+   Paging rule matters: a project's max-rows can be LOWER than PAGE, so the first
+   page can already be "short" and a naive page.length<PAGE test stops early and
+   under-fetches. Advance by rows ACTUALLY returned; stop only on an empty page.
+   Same rule the bulk tally hydrate already uses.
+
+   build() must return a FRESH builder each call — a PostgREST builder cannot be
+   re-ranged after it has been awaited. */
+async function sbAll(build,label,opts){
+  const o=opts||{};
+  const PAGE=o.page||1000, CEIL=o.max||200000, MS=o.ms||12000, LOOPS=o.loops||400;
+  const out=[];
+  let from=0, done=false;
+  for(let guard=0; guard<LOOPS; guard++){
+    const r=await withTimeout(build().range(from,from+PAGE-1),MS,label);
+    if(r&&r.error)throw new Error(r.error.message||'load failed');
+    const d=(r&&r.data)||[];
+    out.push.apply(out,d);
+    if(d.length===0){done=true;break;}  /* only an EMPTY page means done */
+    from+=d.length;                     /* advance by what came back, not PAGE */
+    if(out.length>=CEIL)break;          /* ceiling hit — incomplete, flagged below */
+  }
+  /* Never hand back a short result without saying so. Returning silently short
+     is the exact fault this helper exists to remove; doing it here would only
+     move the bug up a level. Callers must check _truncated. */
+  if(!done){
+    out._truncated=true;
+    try{logSaveFailure('error','sbAll_truncated',(label||'?')+';rows='+out.length);}catch(e){}
+  }
+  return out;
+}
 function logJobEvent(jobId,kind,detail,actorRole){
   if(!jobId||!kind)return;
   try{
@@ -1610,7 +1655,7 @@ async function loadSundriesAll(){
     const r=await withTimeout(sb.from('sundries_entries')
       .select('id,job_id,crew_id,occurred_date,description,amount,updated_at')
       .eq('contractor_slug',CONTRACTOR_SLUG)
-      .order('occurred_date',{ascending:true}),8000,'sundries_load_timeout');
+      .order('occurred_date',{ascending:true}).limit(20000),8000,'sundries_load_timeout');
     if(r&&r.error){
       const m=r.error.message||'';
       if(/sundries_entries/i.test(m)&&/schema cache|does not exist|not find/i.test(m)){
@@ -1629,7 +1674,7 @@ async function loadSundriesForJob(jobId){
     const r=await withTimeout(sb.from('sundries_entries')
       .select('id,crew_id,occurred_date,description,amount,updated_at')
       .eq('contractor_slug',CONTRACTOR_SLUG)
-      .eq('job_id',jobId).order('occurred_date',{ascending:true}),5000,'sundries_load_timeout');
+      .eq('job_id',jobId).limit(5000).order('occurred_date',{ascending:true}),5000,'sundries_load_timeout');
     if(r&&r.error){
       const m=r.error.message||'';
       if(/sundries_entries/i.test(m)&&/schema cache|does not exist|not find/i.test(m)){
@@ -1694,10 +1739,14 @@ async function dbSaveJob(job){
        to display them under. */
     try{
       const tallyRunIdsResult=await withTimeout(
+        /* v4.6.55 — explicit ceiling. A long shed already reaches ~900 count
+           rows; at the server default this guard would silently see a partial
+           set of run ids. */
         sb.from('tally_entries')
           .select('run_id')
           .eq('contractor_slug',CONTRACTOR_SLUG)
           .eq('job_id',job.id)
+          .limit(20000)
           .eq('kind','count')
           .not('run_id','eq',''),
         3000,
@@ -4563,7 +4612,7 @@ const flushMobDesc=(mid,v)=>{
       try{
         const r=await withTimeout(sb.from('job_day_notes')
           .select('note_date,body,updated_by_role,updated_at')
-          .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id),
+          .eq('contractor_slug',CONTRACTOR_SLUG).eq('job_id',job.id).limit(2000),
           8000,'daynotes_load_timeout');
         if(dead)return;
         if(r&&!r.error&&Array.isArray(r.data)){
@@ -5780,7 +5829,7 @@ function WhiteboardTab({job,role}){
     try{
       const r=await withTimeout(
         sb.from('job_whiteboard').select('*')
-          .eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG)
+          .eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG).limit(2000)
           .order('created_at',{ascending:false}),
         8000,'whiteboard_load_timeout');
       if(r&&r.error)throw new Error(r.error.message||'load failed');
@@ -6143,7 +6192,7 @@ function OverviewTab({job,role,onSend,onBroadcast,canSend,onEditFarm,isDraft,onP
     let cancelled=false;
     const fetchViews=async()=>{
       try{
-        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG);
+        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG).limit(1000);
         if(!cancelled&&data){const v={};data.forEach(r=>{v[r.crew_id]=r.viewed_at;});setViews(v);}
       }catch(e){}
     };
@@ -6669,7 +6718,7 @@ function SMSModal({job,onClose,onPreview,farmList,crewList}){
   useEffect(()=>{
     const fetchViews=async()=>{
       try{
-        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG);
+        const {data}=await sb.from('job_views').select('crew_id,viewed_at').eq('job_id',job.id).eq('contractor_slug',CONTRACTOR_SLUG).limit(1000);
         if(data){const v={};data.forEach(r=>{v[r.crew_id]=r.viewed_at;});setViews(v);}
       }catch(e){}
     };
@@ -7258,15 +7307,19 @@ function SeasonStats({jobs,onClose}){
     setBusy(true); setErr('');
     (async()=>{
       try{
-        const r=await withTimeout(
-          sb.from('tally_entries')
-            .select('job_id,cell_date,kind,value,mob_type,mob_desc,crew_id')
-            .eq('contractor_slug',CONTRACTOR_SLUG)
-            .gte('cell_date',f).lte('cell_date',t),
-          12000,'seasonstats_timeout');
+        /* v4.6.55 — paged. Unpaged, a long period silently truncated and the
+           season read lower than the last 30 days. */
+        const data=await sbAll(()=>sb.from('tally_entries')
+          .select('job_id,cell_date,kind,value,mob_type,mob_desc,crew_id')
+          .eq('contractor_slug',CONTRACTOR_SLUG)
+          .gte('cell_date',f).lte('cell_date',t)
+          .order('cell_date',{ascending:true}).order('crew_id',{ascending:true}),
+          'seasonstats_timeout');
         if(dead)return;
-        if(r&&r.error)throw new Error(r.error.message);
-        setRows((r&&r.data)||[]);
+        setRows(data);
+        /* v4.6.55 — if paging could not complete, say so. A short total that
+           looks authoritative is what started this. */
+        if(data&&data._truncated)setErr('Too much data to total reliably for this period \u2014 try a shorter range. The figures below are incomplete.');
       }catch(ex){ if(!dead)setErr(ex.message==='seasonstats_timeout'?'Timed out — try a shorter period':(ex.message||'Load failed')); }
       finally{ if(!dead)setBusy(false); }
     })();
@@ -7474,21 +7527,25 @@ function MyTallies({myId,me,jobs}){
     setBusy(true);setErr('');setNear(null);
     (async()=>{
       try{
-        const r=await withTimeout(
-          sb.from('tally_entries')
-            .select('job_id,cell_date,kind,value,mob_type')
-            .eq('contractor_slug',CONTRACTOR_SLUG)
-            .eq('crew_id',myId)
-            .gte('cell_date',f).lte('cell_date',t),
-          8000,'mytallies_timeout');
+        /* v4.6.55 — paged. A shearer's own season had the same silent
+           truncation as the contractor's Season stats. */
+        const data=await sbAll(()=>sb.from('tally_entries')
+          .select('job_id,cell_date,kind,value,mob_type')
+          .eq('contractor_slug',CONTRACTOR_SLUG)
+          .eq('crew_id',myId)
+          .gte('cell_date',f).lte('cell_date',t)
+          .order('cell_date',{ascending:true}),
+          'mytallies_timeout',{ms:8000});
         if(dead)return;
-        if(r&&r.error)throw new Error(r.error.message);
-        const data=(r&&r.data)||[];
+        if(data&&data._truncated)setErr('Too much data to total reliably \u2014 try a shorter period.');
         setRows(data);
         if(!data.length){
+          /* only the earliest and latest date are used, so bound it explicitly
+             rather than pulling a whole career */
           const n=await withTimeout(
             sb.from('tally_entries').select('cell_date')
-              .eq('contractor_slug',CONTRACTOR_SLUG).eq('crew_id',myId),
+              .eq('contractor_slug',CONTRACTOR_SLUG).eq('crew_id',myId)
+              .order('cell_date',{ascending:true}).limit(5000),
             8000,'mytallies_near_timeout').catch(()=>null);
           if(dead)return;
           const ds=((n&&n.data)||[]).map(x=>x.cell_date).sort();
