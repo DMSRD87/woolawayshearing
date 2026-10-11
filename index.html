@@ -580,6 +580,9 @@ textarea.fi{resize:none;line-height:1.5}
 .drafts-pill-t{font-size:13px;font-weight:700;color:var(--red);line-height:1.1}
 .drafts-pill-s{font-size:11px;color:var(--muted);margin-top:2px}
 .drafts-pill-arr{color:var(--red);font-size:18px;font-weight:700}
+
+/* v4.6.72a: lift the home-board buttons clear of the add-to-home-screen bar */
+body.a2hs-on .fab-stack{bottom:calc(84px + env(safe-area-inset-bottom,0px))!important}
 </style>
 </head>
 <body>
@@ -621,7 +624,10 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.70';
+const APP_VERSION='v4.6.72b';
+/* v4.6.72b (12 Oct 2026): CREW + FARMER SMS TRIM to Dale's wording. Crew: 'Hi X, you have been added to a job with <contractor> starting <date>. Tap the link for details:' + link (+ one lead PIN line) + 'Do not reply'. Farmer: 'Hi X, <contractor> have your shearing locked in. Tap the link to see details:' + link + 'Hit Farmer - PIN <pin>'. Both hold 2 GSM-7 segments at the longest fleet contractor name. Job detail stays behind the link (viewed receipt). SMS text only - no pay, sync, DB or settings change. Built on v4.6.72a; still NO Xero code (that is 4.6.73+, Knights only). */
+/* v4.6.72a (6 Oct 2026): nudge bar no longer hides the home-board buttons - while it shows, the fab-stack lifts clear of it (body.a2hs-on). Shed-name placeholder neutralised to 'e.g. Hilltop' (leak list - old value was a real station name). UI only - no pay, sync or data change. */
+/* v4.6.72 (6 Oct 2026): ADD-TO-HOME-SCREEN NUDGE on the home board. Browser-tab only, phones only, never for farmers; dismiss once = never again on that device; Android Chrome gets a one-tap Install. UI only - no pay, sync, DB or settings change. Built on live v4.6.70; v4.6.71 is the Xero TEST build (Quality only) and is NOT included. */
 const SUPER_RATE=0.12; /* SG rate, 12% from 1 Jul 2025. One-line change if legislated rate moves. */
 /* v4.6.46 (4 Sep 2026): JOB IDENTIFICATION ON PAY OUTPUT. Includes everything in v4.6.45 (abort-on-timeout, APP_VERSION stamping), which was built but never deployed. (1) PAY SUMMARY HEADER gains 'Job #: NNNN-0000 - Type'. The FARM RECORD has carried this since v4.6.3; the pay summary never did, so a printed or shared pay summary identified the FARM only. Two jobs at the same farm were indistinguishable on paper the moment they left the app, and a crew member or payroll officer querying a figure had nothing to quote back. (2) PAY WEEK per-shed lines and the CSV 'shed' column now carry the job number. This is also the grouping key, so two jobs at the same farm within one pay period now report as TWO lines instead of merging into one - deliberate: the same earnings, split across two correctly-labelled lines instead of pooled under one ambiguous one. No amount changes, and per-worker and week totals are identical. Worth knowing before the first pay run on it, because a contractor who is used to seeing one line for a farm will see two. (3) SEASON STATS by-shed likewise. DISPLAY ONLY - no pay calculation, superable base, deduction, tax or total is touched. The CSV shape is the future payroll-export payload, so identifying the job here is a prerequisite for mapping earnings lines to anything external. */
 /* v4.6.45 (4 Sep 2026): TIMED-OUT REQUESTS ARE NOW CANCELLED + BUILD STAMPED ON EVERY DIAGNOSTIC ROW. (1) ABORT ON TIMEOUT - withTimeout was a bare Promise.race across all 26 call sites. When the timer won, the caller queued a retry but the underlying request was never cancelled and stayed on the wire. On satellite the link drops for one to three minutes; requests fired during the window sit in the connection queue while the browser reports online, then all flush at once when it returns, each carrying the blob it was built with minutes earlier, in whatever order the link delivers them. A save that 'failed' lands anyway, at an unpredictable moment, with stale data - and NO guard can stop it, because every guard ran when the request was CONSTRUCTED against a server state that no longer exists. This is why guard_mobrate_kept had never fired fleet-wide while overrides were demonstrably going missing: the damage was never done by a save the guards evaluated. 27 such bursts on the largest contractor in 14 days. postgrest builders are lazy and expose abortSignal(), so attaching a controller inside withTimeout fixes all 26 sites without touching one of them; dbLoad's Promise.all shares one explicit controller since Promise.all has no signal. LIMIT, stated plainly: abort stops a request that has NOT yet reached the server, which during an outage is the common case, but it cannot undo one Postgres has already committed - we simply never hear the reply. Closing that last gap needs optimistic concurrency on the write and is a separate piece of work. (2) APP_VERSION ON EVERY save_failures ROW (column added by migration first) - without it, deciding whether a fix worked meant inferring the build from commit timestamps, and a device running yesterday's cached file is indistinguishable from one running today's. Every measurement from here depends on this. (3) netHealth() tracks consecutive timeouts and lifetime successes, ready for reachability-based offline detection - NOT yet wired to any gating or UI. navigator.onLine is link state, not reachability: 2,224 of 2,229 network failures fleet-wide in 30 days reported online. Replacing that flag changes when saves are attempted or held and deserves its own build. NO pay calculation or report output is touched. */
@@ -7168,20 +7174,16 @@ function buildJobCardSMS(job,crewId,farmList,crewList,appUrl){
      Contractor name used ONCE (not twice) to hold the 2-segment ceiling even for long
      names. GSM-7 only — never introduce emoji or em-dash here (em-dash forces UCS-2 and
      doubles the bill). Full job detail lives behind the link, not in the SMS. */
+  /* v4.6.72b — TRIMMED to Dale's wording (7 Oct 2026). Two segments including the lead
+     line; the old body ran to three for a lead. GSM-7 strictly: no emoji, no em-dash. */
   return [
-    'Hi '+crew.name.split(' ')[0]+', you have been added to a job with '+CONTRACTOR_NAME+' starting '+fmtDate(job.startDate)+'.',
-    '',
-    'Open the link to view the job:',
+    'Hi '+crew.name.split(' ')[0]+', you have been added to a job with '+CONTRACTOR_NAME+' starting '+fmtDate(job.startDate)+'. Tap the link for details:',
     appUrl+'/?job='+job.id+'&crew='+crewId, /* v4.6.11f - query not fragment: fragments are stripped by Android PWA intent launches and some SMS linkifiers */
-    '',
-    /* v4.6.13 — lead block goes ONLY to the designated lead, so the extra segment is one
-       message per job, not one per crew member. GSM-7 strictly: no emoji, no em-dash. */
+    /* v4.6.13 — lead line goes ONLY to the designated lead. */
     ...((job.leadId&&job.leadId===crewId&&crew.pin)?[
-      'You are the shed lead for this job.',
-      'In the app tap Lead (top right) and enter your PIN: '+crew.pin,
-      ''
+      'You are shed lead - tap Lead in the app, PIN '+crew.pin
     ]:[]),
-    'Please do not reply to this text - contact us directly with any questions.'
+    'Do not reply to this text - contact us directly.'
   ].join('\n');
 }
 
@@ -7190,21 +7192,14 @@ function buildFarmerSMS(job,farmerName,farmerPhone,farmList,appUrl){
   const jobName=job.jobName||(farm?farm.name:'Farm');
   const jds=jobDates(job,{calendar:true}); /* v4.6.56 — nor the farmer */
   const endDate=jds.length?jds[jds.length-1]:job.startDate;
+  /* v4.6.72b — TRIMMED to Dale's wording (7 Oct 2026): the job detail lives behind the
+     link (same teaser principle as the crew text). Two segments. Plain ASCII only: this
+     whole body must stay GSM-7 or Twilio bills every segment at UCS-2 rates. */
   return [
-    'Hi '+farmerName+'! '+CONTRACTOR_NAME+' has you scheduled for shearing.',
-    '',
-    jobName+' - '+job.type,
-    'Start: '+fmtDate(job.startDate)+'  End: '+fmtDate(endDate),
-    'Sheep: '+(job.totalSheep||0).toLocaleString(),
-    farm?'Address: '+farm.address:'',
-    '',
-    'View job details: '+appUrl+'/?job='+job.id+'&crew=farmer.'+job.farmId, /* v4.6.11f - query not fragment */ /* v4.6.11c - farmer identity so the tap writes a job_views receipt via the existing deep-link handler */
-    '',
-    /* v4.6.15 - farmer PIN rides with the card. Plain ASCII only: this whole body
-       must stay GSM-7 or Twilio bills every segment at UCS-2 rates. */
-    (farm&&farm.farmerPin)?('Your PIN: '+farm.farmerPin+' - open the link, tap Farmer, see all your sheds.'):'',
-    'Questions? Call or reply to this message.',
-    '- '+CONTRACTOR_NAME+' via myGang'
+    'Hi '+(String(farmerName||'').split(' ')[0]||'there')+', '+CONTRACTOR_NAME+' have your shearing locked in. Tap the link to see details:',
+    appUrl+'/?job='+job.id+'&crew=farmer.'+job.farmId, /* v4.6.11f - query not fragment */ /* v4.6.11c - farmer identity so the tap writes a job_views receipt via the existing deep-link handler */
+    /* v4.6.15 - farmer PIN rides with the card. */
+    (farm&&farm.farmerPin)?('Hit Farmer - PIN '+farm.farmerPin):''
   ].filter(l=>l!==null&&l!=='').join('\n');
 }
 
@@ -7456,7 +7451,7 @@ function AddFarmForm({onAdd,onCancel}){
     e('div',{className:'inline-form-title'},'New Farm'),
     e('div',{className:'inline-form-grid'},
       e('div',{className:'inline-form-full'},e(IField,{lbl:'Farm Name'},
-        e('input',{type:'text',className:'if-inp',placeholder:'e.g. Smith Station',value:name,onChange:ev=>setName(ev.target.value),autoFocus:true}))),
+        e('input',{type:'text',className:'if-inp',placeholder:'e.g. Hilltop',value:name,onChange:ev=>setName(ev.target.value),autoFocus:true}))),
       e('div',{className:'inline-form-full'},e(IField,{lbl:'Address'},
         e('input',{type:'text',className:'if-inp',placeholder:'e.g. 12 Station Rd, Naracoorte SA 5271',value:addr,onChange:ev=>setAddr(ev.target.value)}))),
       e('div',null,e(IField,{lbl:'Stands'},
@@ -9325,6 +9320,56 @@ function AccessGate({onSuccess}){
   );
 }
 
+/* ── v4.6.72 ADD-TO-HOME-SCREEN NUDGE ──
+   Contractors keep forgetting to tell crew how to install the app, so crew run it from a
+   browser tab and lose it. One slim bar on the home board, browser-tab only (hidden when
+   already running from the home screen), phones only, never shown to farmers. Dismiss =
+   gone for good on that device (LS_A2HS_DISMISSED). Android Chrome gets a real one-tap
+   Install via beforeinstallprompt; iOS gets the Share → Add to Home Screen instruction. */
+const LS_A2HS_DISMISSED='mg_a2hs_dismissed';
+let _a2hsPromptEvt=null;
+window.addEventListener('beforeinstallprompt',ev=>{ev.preventDefault();_a2hsPromptEvt=ev;});
+window.addEventListener('appinstalled',()=>{lsSet(LS_A2HS_DISMISSED,true);});
+function a2hsEnv(){
+  const ua=navigator.userAgent||'';
+  const standalone=(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches)||navigator.standalone===true;
+  const ios=/iPad|iPhone|iPod/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  const android=/Android/i.test(ua);
+  return {standalone,ios,android};
+}
+function InstallNudge(){
+  const [gone,setGone]=useState(()=>!!lsGet(LS_A2HS_DISMISSED));
+  const [canInstall,setCanInstall]=useState(!!_a2hsPromptEvt);
+  useEffect(()=>{
+    const h=()=>setCanInstall(true);
+    window.addEventListener('beforeinstallprompt',h);
+    return()=>window.removeEventListener('beforeinstallprompt',h);
+  },[]);
+  const env=a2hsEnv();
+  const show=!(gone||env.standalone||(!env.ios&&!env.android));
+  useEffect(()=>{
+    document.body.classList.toggle('a2hs-on',show);
+    return()=>document.body.classList.remove('a2hs-on');
+  },[show]);
+  if(!show)return null;
+  const dismiss=()=>{lsSet(LS_A2HS_DISMISSED,true);setGone(true);};
+  const install=async()=>{
+    const ev=_a2hsPromptEvt;if(!ev)return;
+    try{ev.prompt();const r=await ev.userChoice;if(r&&r.outcome==='accepted')dismiss();}catch(err){}
+    _a2hsPromptEvt=null;setCanInstall(false);
+  };
+  const msg=env.ios
+    ?e('span',null,'Add myGang to your home screen — tap ',e('b',null,'Share'),' ',e('span',{style:{fontSize:14}},'\u2B06\uFE0E'),' then ',e('b',null,'Add to Home Screen'))
+    :(canInstall
+      ?e('span',null,'Add myGang to your home screen')
+      :e('span',null,'Add myGang to your home screen — tap ',e('b',null,'\u22EE'),' then ',e('b',null,'Add to Home screen')));
+  return e('div',{style:{position:'fixed',left:0,right:0,bottom:0,zIndex:190,background:'var(--hdr)',color:'#fff',borderTop:'2px solid var(--amber)',padding:'10px 12px',paddingBottom:'calc(10px + env(safe-area-inset-bottom,0px))',display:'flex',alignItems:'center',gap:10,fontSize:13,lineHeight:1.3,boxShadow:'0 -2px 10px rgba(0,0,0,.25)'}},
+    e('span',{style:{fontFamily:'var(--h)',fontWeight:800,color:'var(--amber)',fontSize:18,lineHeight:1}},'m'),
+    e('div',{style:{flex:1}},msg),
+    env.android&&canInstall&&e('button',{onClick:install,style:{background:'var(--amber)',color:'#1e2a3a',border:0,borderRadius:8,padding:'7px 12px',fontWeight:800,fontSize:13,cursor:'pointer'}},'Install'),
+    e('button',{onClick:dismiss,'aria-label':'Dismiss',style:{background:'transparent',color:'rgba(255,255,255,.7)',border:0,fontSize:20,lineHeight:1,padding:'4px 6px',cursor:'pointer'}},'\u00D7')
+  );
+}
 function App(){
   const [appUnlocked,setAppUnlocked]=useState(true);
   const [loading,setLoading]=useState(true);
@@ -10143,6 +10188,7 @@ function App(){
 
   return e('div',{style:{paddingTop:(!isOnline||(isOnline&&!isFreshState&&isLoaded.current)||(isOnline&&isFreshState&&isLoaded.current&&pendingCount>0))?20:0}},
     e(StatusBar),
+    screen==='home'&&role!=='farmer'&&e(InstallNudge),
     screen==='home'&&e(HomeScreen,{jobs,role,setRole:persistRole,onJob:goJob,onNew:()=>setShowNew(true),onDatabase:()=>setShowDatabase(true),onSchedule:goSchedule,contractorName:CONTRACTOR_NAME}),
     screen==='schedule'&&role!=='read_only'&&role!=='shed_lead'&&e(ScheduleScreen,{jobs,role,setRole:persistRole,onBack:goHome,onJob:goJob,onNew:()=>setShowNew(true),onNewDraft:()=>setShowNew(true),
       /* v4.6.59 — the roster writes straight to the job and saves it, so a week
